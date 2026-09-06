@@ -1,23 +1,26 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import path from "node:path";
-import { gzipSync } from "node:zlib";
 import { test } from "vitest";
-import { createMockContext, createMockPi } from "../../../test/support.js";
+import { createMockContext } from "../../../test/support.js";
 import {
 	loadConfig,
 	localConfigPath,
 	statePathForConfig,
 	writeStateForConfig,
 } from "../src/config.js";
-import sync from "../src/sync.js";
 import { expectedRemoteHead } from "../src/sync-backend.js";
 import { SyncDecisionRequiredError } from "../src/sync-decision.js";
 import { pull, push, status, syncBoth } from "../src/sync-operations.js";
 import { RemoteSelectionMismatchError } from "../src/sync-policy.js";
 import type { CommandOptions, Snapshot } from "../src/types.js";
-import { snapshot, v3S3Settings, withTempHome } from "./helpers.js";
+import { snapshot, v3GitSettings, withTempHome } from "./helpers.js";
 import { MemorySyncBackend } from "./memory-sync-backend.js";
 
 const options: CommandOptions = {
@@ -33,7 +36,9 @@ const options: CommandOptions = {
 test("sync and pull pause without mutation when remote included content differs", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		writeFileSync(path.join(agentDir, "settings.json"), '{"local":true}\n');
 		const backend = new MemorySyncBackend();
 		const remote = {
@@ -48,7 +53,10 @@ test("sync and pull pause without mutation when remote included content differs"
 			},
 		};
 		await backend.publishSnapshot(remote, { kind: "missing" });
-		const { ctx, notifications } = createMockContext({ hasUI: true, mode: "tui" });
+		const { ctx, notifications } = createMockContext({
+			hasUI: true,
+			mode: "tui",
+		});
 
 		for (const operation of [
 			() => syncBoth(ctx, { ...options, auto: true }, () => backend),
@@ -57,8 +65,14 @@ test("sync and pull pause without mutation when remote included content differs"
 			await assert.rejects(operation(), RemoteSelectionMismatchError);
 		}
 		await status(ctx, options, () => backend);
-		assert.match(notifications.at(-1)?.message ?? "", /remote included content: differs/i);
-		assert.equal(readFileSync(path.join(agentDir, "settings.json"), "utf8"), '{"local":true}\n');
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/remote included content: differs/i,
+		);
+		assert.equal(
+			readFileSync(path.join(agentDir, "settings.json"), "utf8"),
+			'{"local":true}\n',
+		);
 		assert.equal(existsSync(path.join(agentDir, "pi-starship.toml")), false);
 		assert.equal(existsSync(statePathForConfig(await loadConfig())), false);
 	});
@@ -67,7 +81,9 @@ test("sync and pull pause without mutation when remote included content differs"
 test("ordinary push checks a differing head policy even when legacy state matches its snapshot", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		const base = Buffer.from('{"base":true}\n');
 		writeFileSync(path.join(agentDir, "settings.json"), base);
 		const backend = new MemorySyncBackend();
@@ -82,7 +98,9 @@ test("ordinary push checks a differing head policy even when legacy state matche
 				include: ["settings.json", "pi-starship.toml"],
 			},
 		};
-		const published = await backend.publishSnapshot(remote, { kind: "missing" });
+		const published = await backend.publishSnapshot(remote, {
+			kind: "missing",
+		});
 		const config = await loadConfig();
 		await writeStateForConfig(config, {
 			version: 1,
@@ -101,14 +119,19 @@ test("ordinary push checks a differing head policy even when legacy state matche
 			RemoteSelectionMismatchError,
 		);
 		assert.equal((await backend.readHead())?.revision, headBefore?.revision);
-		assert.deepEqual((await backend.readSnapshot(remote.id)).selection, remote.selection);
+		assert.deepEqual(
+			(await backend.readSnapshot(remote.id)).selection,
+			remote.selection,
+		);
 	});
 });
 
 test("reviewed force push keeps local selection and preserves remote unmanaged files", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		writeFileSync(path.join(agentDir, "settings.json"), '{"local":true}\n');
 		const backend = new MemorySyncBackend();
 		await backend.publishSnapshot(
@@ -135,11 +158,19 @@ test("reviewed force push keeps local selection and preserves remote unmanaged f
 			},
 		});
 
-		await push(ctx, { ...options, yes: false, force: true }, undefined, () => backend);
+		await push(
+			ctx,
+			{ ...options, yes: false, force: true },
+			undefined,
+			() => backend,
+		);
 		const head = await backend.readHead();
 		assert.ok(head);
 		const published = await backend.readSnapshot(head.snapshotRef);
-		assert.deepEqual(published.selection, { version: 1, include: ["settings.json"] });
+		assert.deepEqual(published.selection, {
+			version: 1,
+			include: ["settings.json"],
+		});
 		assert.match(reviews.join("\n"), /replace the differing remote selection/i);
 		assert.deepEqual(published.files.map((file) => file.path).sort(), [
 			"pi-starship.toml",
@@ -148,17 +179,92 @@ test("reviewed force push keeps local selection and preserves remote unmanaged f
 	});
 });
 
+test("refreshed force push re-scans secrets and rejects preserved remote secrets", async () => {
+	await withTempHome(async (agentDir) => {
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
+		writeFileSync(path.join(agentDir, "settings.json"), '{"local":true}\n');
+		const backend = new MemorySyncBackend();
+		await backend.publishSnapshot(
+			{
+				...snapshot([
+					{ path: "settings.json", content: Buffer.from('{"remote":true}\n') },
+					{ path: "pi-starship.toml", content: Buffer.from("clean\n") },
+				]),
+				id: "remote-1",
+				selection: {
+					version: 1,
+					include: ["settings.json", "pi-starship.toml"],
+				},
+			},
+			{ kind: "missing" },
+		);
+		const { ctx } = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			confirm: async () => {
+				await backend.publishSnapshot(
+					{
+						...snapshot([
+							{
+								path: "settings.json",
+								content: Buffer.from('{"remote":true}\n'),
+							},
+							{
+								path: "pi-starship.toml",
+								content: Buffer.from(
+									"ANTHROPIC_API_KEY=sk-ant-api03-123456789012345678901234567890\n",
+								),
+							},
+						]),
+						id: "remote-2",
+						selection: {
+							version: 1,
+							include: ["settings.json", "pi-starship.toml"],
+						},
+					},
+					{
+						kind: "revision",
+						revision: (await backend.readHead())?.revision ?? "missing",
+					},
+				);
+				return true;
+			},
+		});
+
+		await assert.rejects(
+			push(
+				ctx,
+				{ ...options, yes: false, force: true },
+				undefined,
+				() => backend,
+			),
+			/Refusing to push possible secrets/i,
+		);
+	});
+});
+
 test("push reports a structured remote-or-policy decision without mutation", async () => {
 	await withInitializedSync(async ({ agentDir, backend, config }) => {
-		writeFileSync(path.join(agentDir, "settings.json"), '{"local":"changed"}\n');
+		writeFileSync(
+			path.join(agentDir, "settings.json"),
+			'{"local":"changed"}\n',
+		);
 		writeFileSync(path.join(agentDir, "AGENTS.md"), "local policy addition\n");
 		writeFileSync(
 			localConfigPath(),
-			JSON.stringify(v3S3Settings({ include: ["settings.json", "AGENTS.md"] })),
+			JSON.stringify(
+				v3GitSettings({ include: ["settings.json", "AGENTS.md"] }),
+			),
 			{ mode: 0o600 },
 		);
 		const remote = namedSnapshot("remote-change", '{"remote":"changed"}\n');
-		await backend.publishSnapshot(remote, expectedRemoteHead(await backend.readHead()));
+		await backend.publishSnapshot(
+			remote,
+			expectedRemoteHead(await backend.readHead()),
+		);
 		const headBefore = await backend.readHead();
 
 		await assert.rejects(pushContext(backend), (error: unknown) => {
@@ -170,7 +276,10 @@ test("push reports a structured remote-or-policy decision without mutation", asy
 			assert.equal(error.decision.causes.remoteChanged, true);
 			assert.equal(error.decision.causes.policyChanged, true);
 			assert.deepEqual(error.decision.previousInclude, ["settings.json"]);
-			assert.deepEqual(error.decision.currentInclude, ["settings.json", "AGENTS.md"]);
+			assert.deepEqual(error.decision.currentInclude, [
+				"settings.json",
+				"AGENTS.md",
+			]);
 			assert.match(error.decision.review, /Different: settings\.json/u);
 			return true;
 		});
@@ -185,9 +294,15 @@ test("push reports a structured remote-or-policy decision without mutation", asy
 
 test("pull and Sync now report structured both-changed decisions without mutation", async () => {
 	await withInitializedSync(async ({ agentDir, backend }) => {
-		writeFileSync(path.join(agentDir, "settings.json"), '{"local":"changed"}\n');
+		writeFileSync(
+			path.join(agentDir, "settings.json"),
+			'{"local":"changed"}\n',
+		);
 		const remote = namedSnapshot("remote-change", '{"remote":"changed"}\n');
-		await backend.publishSnapshot(remote, expectedRemoteHead(await backend.readHead()));
+		await backend.publishSnapshot(
+			remote,
+			expectedRemoteHead(await backend.readHead()),
+		);
 		const { ctx } = createMockContext({ hasUI: true, mode: "tui" });
 		for (const operation of [pull, syncBoth]) {
 			await assert.rejects(
@@ -211,9 +326,15 @@ test("pull and Sync now report structured both-changed decisions without mutatio
 
 test("forced pull reuses backup and apply safeguards after a decision", async () => {
 	await withInitializedSync(async ({ agentDir, backend }) => {
-		writeFileSync(path.join(agentDir, "settings.json"), '{"local":"changed"}\n');
+		writeFileSync(
+			path.join(agentDir, "settings.json"),
+			'{"local":"changed"}\n',
+		);
 		const remote = namedSnapshot("remote-change", '{"remote":"changed"}\n');
-		await backend.publishSnapshot(remote, expectedRemoteHead(await backend.readHead()));
+		await backend.publishSnapshot(
+			remote,
+			expectedRemoteHead(await backend.readHead()),
+		);
 		const { ctx } = createMockContext({ hasUI: true, mode: "tui" });
 
 		const outcome = await pull(ctx, { ...options, force: true }, () => backend);
@@ -222,7 +343,9 @@ test("forced pull reuses backup and apply safeguards after a decision", async ()
 			readFileSync(path.join(agentDir, "settings.json"), "utf8"),
 			'{"remote":"changed"}\n',
 		);
-		assert.ok(readdirSync(path.join(agentDir, "pi-sync", "backups")).length > 0);
+		assert.ok(
+			readdirSync(path.join(agentDir, "pi-sync", "backups")).length > 0,
+		);
 	});
 });
 
@@ -233,7 +356,10 @@ test("forced push still refuses secrets after a decision", async () => {
 			'{"note":"OPENAI_API_KEY=abcdefghijklmnopqrstuvwxyz123456"}\n',
 		);
 		const remote = namedSnapshot("remote-change", '{"remote":"changed"}\n');
-		await backend.publishSnapshot(remote, expectedRemoteHead(await backend.readHead()));
+		await backend.publishSnapshot(
+			remote,
+			expectedRemoteHead(await backend.readHead()),
+		);
 		const headBefore = await backend.readHead();
 		const { ctx } = createMockContext({ hasUI: true, mode: "tui" });
 
@@ -248,12 +374,17 @@ test("forced push still refuses secrets after a decision", async () => {
 test("first sync reports different settings as an initial-source decision", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		writeFileSync(path.join(agentDir, "settings.json"), '{"local":true}\n');
 		const backend = new MemorySyncBackend();
-		await backend.publishSnapshot(namedSnapshot("remote", '{"remote":true}\n'), {
-			kind: "missing",
-		});
+		await backend.publishSnapshot(
+			namedSnapshot("remote", '{"remote":true}\n'),
+			{
+				kind: "missing",
+			},
+		);
 		const { ctx } = createMockContext({ hasUI: true, mode: "tui" });
 
 		await assert.rejects(
@@ -265,7 +396,10 @@ test("first sync reports different settings as an initial-source decision", asyn
 				return true;
 			},
 		);
-		assert.equal(readFileSync(path.join(agentDir, "settings.json"), "utf8"), '{"local":true}\n');
+		assert.equal(
+			readFileSync(path.join(agentDir, "settings.json"), "utf8"),
+			'{"local":true}\n',
+		);
 		assert.equal(existsSync(statePathForConfig(await loadConfig())), false);
 	});
 });
@@ -275,11 +409,14 @@ test("first sync reports different sessions as an initial-source decision", asyn
 		mkdirSync(path.join(agentDir, "sessions"), { recursive: true });
 		writeFileSync(
 			localConfigPath(),
-			JSON.stringify(v3S3Settings({ include: ["settings.json", "sessions"] })),
+			JSON.stringify(v3GitSettings({ include: ["settings.json", "sessions"] })),
 			{ mode: 0o600 },
 		);
 		writeFileSync(path.join(agentDir, "settings.json"), '{"same":true}\n');
-		writeFileSync(path.join(agentDir, "sessions", "one.jsonl"), '{"local":true}\n');
+		writeFileSync(
+			path.join(agentDir, "sessions", "one.jsonl"),
+			'{"local":true}\n',
+		);
 		const backend = new MemorySyncBackend();
 		const remote = snapshot([
 			{ path: "settings.json", content: Buffer.from('{"same":true}\n') },
@@ -307,85 +444,12 @@ test("first sync reports different sessions as an initial-source decision", asyn
 	});
 });
 
-test("automatic sync reports a directional conflict without opening recovery UI", async () => {
-	await withTempHome(async (agentDir) => {
-		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings({ automatic: true })), {
-			mode: 0o600,
-		});
-		writeFileSync(path.join(agentDir, "settings.json"), '{"local":true}\n');
-		const remote = { ...namedSnapshot("remote", '{"remote":true}\n'), profile: "home" };
-		const encoded = gzipSync(Buffer.from(JSON.stringify(remote)));
-		const pointer = {
-			version: 1,
-			profile: "home",
-			snapshot: remote.id,
-			sha256: createHash("sha256").update(encoded).digest("hex"),
-			createdAt: remote.createdAt,
-			machine: remote.machine,
-		};
-		const originalFetch = globalThis.fetch;
-		globalThis.fetch = async (input) => {
-			const url = new URL(String(input));
-			if (url.pathname.endsWith("/latest.json")) {
-				return Response.json(pointer, { headers: { etag: '"latest"' } });
-			}
-			if (url.pathname.includes("/snapshots/")) {
-				return new Response(new Uint8Array(encoded), { headers: { etag: '"snapshot"' } });
-			}
-			throw new Error(`Unexpected request: ${url.pathname}`);
-		};
-		let customCalls = 0;
-		const mock = createMockPi();
-		sync(mock.pi);
-		const { ctx, notifications } = createMockContext({
-			hasUI: true,
-			mode: "tui",
-			custom: async () => {
-				customCalls += 1;
-				return undefined;
-			},
-		});
-		try {
-			await mock.events.get("session_start")?.[0]?.({}, ctx);
-		} finally {
-			globalThis.fetch = originalFetch;
-		}
-		assert.equal(customCalls, 0);
-		assert.match(
-			notifications.at(-1)?.message ?? "",
-			/pi-sync auto sync skipped: Remote settings exist.*different local Pi settings/u,
-		);
-		assert.equal(readFileSync(path.join(agentDir, "settings.json"), "utf8"), '{"local":true}\n');
-	});
-});
-
-test("direct pull retains its actionable notification instead of opening recovery UI", async () => {
-	await withTempHome(async (agentDir) => {
-		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
-		writeFileSync(path.join(agentDir, "settings.json"), '{"local":true}\n');
-		const mock = createMockPi();
-		sync(mock.pi);
-		const { ctx, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
-		const originalFetch = globalThis.fetch;
-		globalThis.fetch = async () => new Response(null, { status: 404 });
-		try {
-			await mock.commands.get("sync")?.handler("pull", ctx);
-		} finally {
-			globalThis.fetch = originalFetch;
-		}
-		assert.match(
-			notifications.at(-1)?.message ?? "",
-			/Remote is empty\. Run \/sync push from a configured machine first/u,
-		);
-	});
-});
-
 test("push reports confirmation cancellation without publishing", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		writeFileSync(path.join(agentDir, "settings.json"), '{"local":true}\n');
 		const backend = new MemorySyncBackend();
 		const { ctx } = createMockContext({
@@ -405,7 +469,9 @@ test("push reports confirmation cancellation without publishing", async () => {
 test("pull from an empty remote offers only a structured push decision", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		writeFileSync(path.join(agentDir, "settings.json"), '{"local":true}\n');
 		const backend = new MemorySyncBackend();
 		const { ctx } = createMockContext({ hasUI: true, mode: "tui" });
@@ -433,7 +499,9 @@ async function withInitializedSync(
 ) {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		writeFileSync(path.join(agentDir, "settings.json"), '{"base":true}\n');
 		const backend = new MemorySyncBackend();
 		const { ctx } = createMockContext({ hasUI: true, mode: "tui" });
@@ -448,5 +516,8 @@ function pushContext(backend: MemorySyncBackend) {
 }
 
 function namedSnapshot(id: string, content: string): Snapshot {
-	return { ...snapshot([{ path: "settings.json", content: Buffer.from(content) }]), id };
+	return {
+		...snapshot([{ path: "settings.json", content: Buffer.from(content) }]),
+		id,
+	};
 }

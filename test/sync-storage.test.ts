@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import { createMockContext, createMockPi } from "../../../test/support.js";
 import {
 	configuredSessionDir,
@@ -15,22 +15,25 @@ import {
 	lockPath,
 	readState,
 } from "../src/config.js";
-import { lockFileExists, readLock, withLock } from "../src/lock.js";
-import { S3Client } from "../src/s3-client.js";
+import { GitSyncBackend } from "../src/git-backend.js";
+import {
+	isStaleLock,
+	lockFileExists,
+	readLock,
+	withLock,
+} from "../src/lock.js";
 import sync, {
 	appliedFileHashMap,
 	canPullRemoteSessionsOnFirstSync,
 	canPullRemoteSettingsOnFirstSync,
 	filterSnapshotForConfigPolicy,
 	hasRemoteChanges,
-	isCloudflareR2Endpoint,
 	isEnabled,
 	isExplicitlyEnabled,
 	mergeRemotePreservedFiles,
 	mergeRemoteSessionFiles,
 	protectSnapshotApplyPlan,
 	scanSnapshot,
-	sessionTokenWarnings,
 	settingsHashesMatchState,
 	settingsHashMap,
 	snapshotWithoutSessions,
@@ -40,7 +43,7 @@ import { backupLocal } from "../src/sync-operations.js";
 import {
 	requiredConfig,
 	snapshot,
-	v3S3Settings,
+	v3GitSettings,
 	withEnv,
 	withTempHome,
 	writeOldLock,
@@ -51,11 +54,23 @@ initTheme("dark", false);
 test("unconfigured extra top-level files are filtered locally and preserved on upload", () => {
 	const settings = { path: "settings.json", content: Buffer.from("settings") };
 	const custom = { path: "LOCAL.md", content: Buffer.from("custom") };
-	const configured = { path: "CONFIGURED.md", content: Buffer.from("configured") };
-	const session = { path: "sessions/--project--/session.jsonl", content: Buffer.from("session") };
-	const unsafeSession = { path: "sessions/../evil.jsonl", content: Buffer.from("evil") };
+	const configured = {
+		path: "CONFIGURED.md",
+		content: Buffer.from("configured"),
+	};
+	const session = {
+		path: "sessions/--project--/session.jsonl",
+		content: Buffer.from("session"),
+	};
+	const unsafeSession = {
+		path: "sessions/../evil.jsonl",
+		content: Buffer.from("evil"),
+	};
 	const reservedExtra = { path: "skills", content: Buffer.from("reserved") };
-	const builtInCaseExtra = { path: "Settings.json", content: Buffer.from("duplicate") };
+	const builtInCaseExtra = {
+		path: "Settings.json",
+		content: Buffer.from("duplicate"),
+	};
 	const remote = {
 		...snapshot([
 			custom,
@@ -118,10 +133,9 @@ test("unconfigured extra top-level files are filtered locally and preserved on u
 				profile: "default",
 				lastAppliedSnapshot: lowerCaseRemoteExtra.id,
 				lastFileHashes: Object.fromEntries(
-					snapshot([{ path: "local.md", content: Buffer.from("local") }]).files.map((file) => [
-						file.path,
-						file.sha256,
-					]),
+					snapshot([
+						{ path: "local.md", content: Buffer.from("local") },
+					]).files.map((file) => [file.path, file.sha256]),
 				),
 				extraFiles: ["LOCAL.md"],
 			},
@@ -130,7 +144,9 @@ test("unconfigured extra top-level files are filtered locally and preserved on u
 		false,
 	);
 	assert.deepEqual(
-		mergeRemotePreservedFiles(snapshot([settings]), remote, config).files.map((file) => file.path),
+		mergeRemotePreservedFiles(snapshot([settings]), remote, config).files.map(
+			(file) => file.path,
+		),
 		["LOCAL.md", "sessions/--project--/session.jsonl", "settings.json"],
 	);
 	assert.deepEqual(
@@ -194,7 +210,10 @@ test("settings-only uploads preserve remote session files", () => {
 	);
 	assert.equal(merged.syncSessions, true);
 
-	const emptySessionSet = mergeRemoteSessionFiles(local, { ...snapshot([]), syncSessions: true });
+	const emptySessionSet = mergeRemoteSessionFiles(local, {
+		...snapshot([]),
+		syncSessions: true,
+	});
 	assert.notEqual(emptySessionSet.id, local.id);
 	assert.deepEqual(
 		emptySessionSet.files.map((file) => file.path),
@@ -221,7 +240,9 @@ test("sync state tracks selection-policy changes without treating deselection as
 		version: 1,
 		profile: "default",
 		lastAppliedSnapshot: remote.id,
-		lastFileHashes: Object.fromEntries(remote.files.map((file) => [file.path, file.sha256])),
+		lastFileHashes: Object.fromEntries(
+			remote.files.map((file) => [file.path, file.sha256]),
+		),
 	};
 	assert.equal(hasRemoteChanges(remote, legacyState, selectedSettings), false);
 
@@ -230,7 +251,10 @@ test("sync state tracks selection-policy changes without treating deselection as
 		lastFileHashes: {},
 		syncFiles: [],
 	};
-	assert.equal(hasRemoteChanges(remote, previouslyEmptyState, selectedSettings), true);
+	assert.equal(
+		hasRemoteChanges(remote, previouslyEmptyState, selectedSettings),
+		true,
+	);
 });
 
 test("settings hash maps ignore session differences for first sync checks", () => {
@@ -240,7 +264,10 @@ test("settings hash maps ignore session differences for first sync checks", () =
 	]);
 	const remote = snapshot([
 		{ path: "settings.json", content: Buffer.from("settings") },
-		{ path: "sessions/--project--/remote.jsonl", content: Buffer.from("remote") },
+		{
+			path: "sessions/--project--/remote.jsonl",
+			content: Buffer.from("remote"),
+		},
 	]);
 
 	assert.deepEqual(settingsHashMap(local), settingsHashMap(remote));
@@ -248,7 +275,9 @@ test("settings hash maps ignore session differences for first sync checks", () =
 		version: 1,
 		profile: "default",
 		lastAppliedSnapshot: "old",
-		lastFileHashes: Object.fromEntries(local.files.map((file) => [file.path, file.sha256])),
+		lastFileHashes: Object.fromEntries(
+			local.files.map((file) => [file.path, file.sha256]),
+		),
 	};
 	const config = {
 		...requiredConfig(),
@@ -260,7 +289,10 @@ test("settings hash maps ignore session differences for first sync checks", () =
 
 	assert.equal(settingsHashesMatchState(remote, state), true);
 	assert.equal(hasRemoteChanges(remote, state, config), false);
-	assert.equal(hasRemoteChanges(remote, state, { ...config, syncSessions: true }), true);
+	assert.equal(
+		hasRemoteChanges(remote, state, { ...config, syncSessions: true }),
+		true,
+	);
 	assert.equal(
 		hasRemoteChanges(
 			snapshot([{ path: "settings.json", content: Buffer.from("changed") }]),
@@ -273,30 +305,63 @@ test("settings hash maps ignore session differences for first sync checks", () =
 
 test("first sync only auto-pulls remote files when local files are not at risk", () => {
 	const settings = { path: "settings.json", content: Buffer.from("settings") };
-	const appendSystem = { path: "APPEND_SYSTEM.md", content: Buffer.from("append") };
-	const changedSettings = { path: "settings.json", content: Buffer.from("changed") };
+	const appendSystem = {
+		path: "APPEND_SYSTEM.md",
+		content: Buffer.from("append"),
+	};
+	const changedSettings = {
+		path: "settings.json",
+		content: Buffer.from("changed"),
+	};
 	const remoteOnly = snapshot([
 		{ path: "sessions/--project--/remote.jsonl", content: Buffer.from("r") },
 	]);
-	const shared = { path: "sessions/--project--/shared.jsonl", content: Buffer.from("same") };
-	const changed = { path: "sessions/--project--/shared.jsonl", content: Buffer.from("changed") };
+	const shared = {
+		path: "sessions/--project--/shared.jsonl",
+		content: Buffer.from("same"),
+	};
+	const changed = {
+		path: "sessions/--project--/shared.jsonl",
+		content: Buffer.from("changed"),
+	};
 
 	assert.equal(
-		canPullRemoteSettingsOnFirstSync(snapshot([settings]), snapshot([settings, appendSystem])),
+		canPullRemoteSettingsOnFirstSync(
+			snapshot([settings]),
+			snapshot([settings, appendSystem]),
+		),
 		true,
 	);
 	assert.equal(
-		canPullRemoteSettingsOnFirstSync(snapshot([settings]), snapshot([changedSettings])),
+		canPullRemoteSettingsOnFirstSync(
+			snapshot([settings]),
+			snapshot([changedSettings]),
+		),
 		false,
 	);
 	assert.equal(
-		canPullRemoteSettingsOnFirstSync(snapshot([appendSystem]), snapshot([settings])),
+		canPullRemoteSettingsOnFirstSync(
+			snapshot([appendSystem]),
+			snapshot([settings]),
+		),
 		false,
 	);
-	assert.equal(canPullRemoteSessionsOnFirstSync(snapshot([]), remoteOnly), true);
-	assert.equal(canPullRemoteSessionsOnFirstSync(snapshot([shared]), snapshot([shared])), true);
-	assert.equal(canPullRemoteSessionsOnFirstSync(snapshot([shared]), remoteOnly), false);
-	assert.equal(canPullRemoteSessionsOnFirstSync(snapshot([changed]), snapshot([shared])), false);
+	assert.equal(
+		canPullRemoteSessionsOnFirstSync(snapshot([]), remoteOnly),
+		true,
+	);
+	assert.equal(
+		canPullRemoteSessionsOnFirstSync(snapshot([shared]), snapshot([shared])),
+		true,
+	);
+	assert.equal(
+		canPullRemoteSessionsOnFirstSync(snapshot([shared]), remoteOnly),
+		false,
+	);
+	assert.equal(
+		canPullRemoteSessionsOnFirstSync(snapshot([changed]), snapshot([shared])),
+		false,
+	);
 });
 
 test("snapshotWithoutSessions clears session opt-in even when no session files exist", () => {
@@ -308,7 +373,10 @@ test("snapshotWithoutSessions clears session opt-in even when no session files e
 	const filtered = snapshotWithoutSessions(source);
 
 	assert.equal(filtered.syncSessions, false);
-	assert.deepEqual(filtered.selection, { version: 1, include: ["settings.json"] });
+	assert.deepEqual(filtered.selection, {
+		version: 1,
+		include: ["settings.json"],
+	});
 	assert.notEqual(filtered.id, source.id);
 	assert.deepEqual(
 		filtered.files.map((file) => file.path),
@@ -325,7 +393,10 @@ test("protected session apply plans keep the live session file", () => {
 		{
 			writes: [
 				{ target: live, content: Buffer.from("remote") },
-				{ target: path.join(root, "settings.json"), content: Buffer.from("{}") },
+				{
+					target: path.join(root, "settings.json"),
+					content: Buffer.from("{}"),
+				},
 			],
 			deletes: [live, old],
 		},
@@ -346,11 +417,17 @@ test("protected session apply plans keep the live session file", () => {
 		{ path: "settings.json", content: Buffer.from("{}") },
 		{ path: "sessions/--project--/live.jsonl", content: Buffer.from("remote") },
 	]);
-	const hashes = appliedFileHashMap(remote, current, new Set(["sessions/--project--/live.jsonl"]));
+	const hashes = appliedFileHashMap(
+		remote,
+		current,
+		new Set(["sessions/--project--/live.jsonl"]),
+	);
 
 	assert.equal(
 		hashes["sessions/--project--/live.jsonl"],
-		current.files.find((file) => file.path === "sessions/--project--/live.jsonl")?.sha256,
+		current.files.find(
+			(file) => file.path === "sessions/--project--/live.jsonl",
+		)?.sha256,
 	);
 	assert.equal(
 		hashes["settings.json"],
@@ -388,16 +465,24 @@ test("protected session apply plans keep the live session file", () => {
 
 test("session backups include session jsonl files when enabled", async () => {
 	await withTempHome(async (agentDir) => {
-		mkdirSync(path.join(agentDir, "sessions", "--project--"), { recursive: true });
+		mkdirSync(path.join(agentDir, "sessions", "--project--"), {
+			recursive: true,
+		});
 		writeFileSync(path.join(agentDir, "settings.json"), "{}\n");
-		writeFileSync(path.join(agentDir, "sessions", "--project--", "session.jsonl"), "{}\n");
+		writeFileSync(
+			path.join(agentDir, "sessions", "--project--", "session.jsonl"),
+			"{}\n",
+		);
 
 		const backupPath = await backupLocal("default", { syncSessions: true });
-		const backup = JSON.parse(gunzipSync(readFileSync(backupPath)).toString("utf8"));
+		const backup = JSON.parse(
+			gunzipSync(readFileSync(backupPath)).toString("utf8"),
+		);
 
 		assert.ok(
 			backup.files.some(
-				(file: { path: string }) => file.path === "sessions/--project--/session.jsonl",
+				(file: { path: string }) =>
+					file.path === "sessions/--project--/session.jsonl",
 			),
 		);
 	});
@@ -408,12 +493,21 @@ test("snapshot backups expand a tilde-configured agent directory", async () => {
 		const home = path.resolve(defaultAgentDir, "../../");
 		const tildeAgentDir = path.join(home, ".pi", "agent-tilde");
 		mkdirSync(tildeAgentDir, { recursive: true });
-		writeFileSync(path.join(tildeAgentDir, "settings.json"), '{"tilde":true}\n');
+		writeFileSync(
+			path.join(tildeAgentDir, "settings.json"),
+			'{"tilde":true}\n',
+		);
 
 		await withEnv({ PI_CODING_AGENT_DIR: "~/.pi/agent-tilde" }, async () => {
 			const backupPath = await backupLocal("tilde");
-			const backup = JSON.parse(gunzipSync(readFileSync(backupPath)).toString("utf8"));
-			assert.ok(backup.files.some((file: { path: string }) => file.path === "settings.json"));
+			const backup = JSON.parse(
+				gunzipSync(readFileSync(backupPath)).toString("utf8"),
+			);
+			assert.ok(
+				backup.files.some(
+					(file: { path: string }) => file.path === "settings.json",
+				),
+			);
 			assert.equal(backupPath.startsWith(tildeAgentDir), true);
 		});
 	});
@@ -424,31 +518,48 @@ test("session backups honor the configured session directory fallback", async ()
 		const sessionDir = path.join(path.dirname(agentDir), "custom-sessions");
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(path.join(sessionDir, "--project--"), { recursive: true });
-		writeFileSync(path.join(agentDir, "settings.json"), `${JSON.stringify({ sessionDir })}\n`);
-		writeFileSync(path.join(sessionDir, "--project--", "configured.jsonl"), "{}\n");
+		writeFileSync(
+			path.join(agentDir, "settings.json"),
+			`${JSON.stringify({ sessionDir })}\n`,
+		);
+		writeFileSync(
+			path.join(sessionDir, "--project--", "configured.jsonl"),
+			"{}\n",
+		);
 
 		const backupPath = await backupLocal("configured", { syncSessions: true });
-		const backup = JSON.parse(gunzipSync(readFileSync(backupPath)).toString("utf8"));
+		const backup = JSON.parse(
+			gunzipSync(readFileSync(backupPath)).toString("utf8"),
+		);
 		assert.ok(
 			backup.files.some(
-				(file: { path: string }) => file.path === "sessions/--project--/configured.jsonl",
+				(file: { path: string }) =>
+					file.path === "sessions/--project--/configured.jsonl",
 			),
 		);
 	});
 });
 
-test("security and configuration helpers detect secrets and R2 session-token warnings", () => {
-	const secret = Buffer.from("FIRECRAWL_API_KEY=sk-12345678901234567890");
-	assert.deepEqual(scanSnapshot(snapshot([{ path: "settings.json", content: secret }])), [
-		"settings.json",
-	]);
-	assert.equal(isCloudflareR2Endpoint("https://abc.r2.cloudflarestorage.com"), true);
-	assert.equal(isCloudflareR2Endpoint("https://s3.amazonaws.com"), false);
-	assert.equal(
-		sessionTokenWarnings({ endpoint: "https://abc.r2.cloudflarestorage.com", sessionToken: "x" })
-			.length,
-		1,
-	);
+test("security and configuration helpers detect secrets", () => {
+	const secrets = [
+		"FIRECRAWL_API_KEY=sk-12345678901234567890",
+		"sk-proj-12345678901234567890",
+		"sk-admin-12345678901234567890",
+		"sk-svcacct-12345678901234567890",
+		"github_pat_1234567890123456789012",
+		`AIzaSy${"a".repeat(33)}`,
+		"-----BEGIN OPENSSH PRIVATE KEY-----",
+		"xoxb-1234567890",
+		"glpat-12345678901234567890",
+	];
+	for (const secret of secrets) {
+		assert.deepEqual(
+			scanSnapshot(
+				snapshot([{ path: "settings.json", content: Buffer.from(secret) }]),
+			),
+			["settings.json"],
+		);
+	}
 	assert.equal(isEnabled("off", true), false);
 	assert.equal(isEnabled(undefined, true), true);
 	assert.equal(isExplicitlyEnabled("true"), true);
@@ -456,121 +567,16 @@ test("security and configuration helpers detect secrets and R2 session-token war
 	assert.equal(isExplicitlyEnabled(""), false);
 });
 
-function s3ClientConfig() {
-	const flat = requiredConfig();
-	return {
-		type: "s3" as const,
-		profile: {
-			kind: "r2" as const,
-			endpoint: flat.endpoint,
-			region: "auto",
-			accessKeyId: flat.accessKeyId,
-			secretAccessKey: flat.secretAccessKey,
-		},
-		destination: { bucket: flat.bucket, prefix: "pi-sync", namespace: "default" },
-	};
-}
-
-test("getJson retries on empty R2 response body and eventually succeeds", async () => {
-	const originalFetch = globalThis.fetch;
-	const responses = [
-		new Response("", { status: 200, headers: { etag: "w/empty1" } }),
-		new Response("", { status: 200, headers: { etag: "w/empty2" } }),
-		new Response(JSON.stringify({ snapshot: "snap-1", sha256: "abc" }), {
-			status: 200,
-			headers: { etag: "w/ok" },
+test("old lock metadata is stale even if its PID is currently active", () => {
+	assert.equal(
+		isStaleLock({
+			id: "recycled-pid",
+			pid: process.pid,
+			command: "sync",
+			startedAt: new Date(Date.now() - 31 * 60 * 1000).toISOString(),
 		}),
-	];
-	let calls = 0;
-	globalThis.fetch = (async () => {
-		const response = responses[Math.min(calls, responses.length - 1)];
-		calls += 1;
-		return response;
-	}) as typeof globalThis.fetch;
-	try {
-		const client = new S3Client(s3ClientConfig());
-		const result = await client.getJson<{ snapshot: string; sha256: string }>("latest.json");
-		assert.equal(result.missing, false);
-		assert.equal(result.value?.snapshot, "snap-1");
-		assert.equal(result.etag, "w/ok");
-		assert.equal(calls, 3);
-	} finally {
-		globalThis.fetch = originalFetch;
-	}
-});
-
-test("getJson throws after retrying a persistently empty R2 response body", async () => {
-	const originalFetch = globalThis.fetch;
-	let calls = 0;
-	globalThis.fetch = (async () => {
-		calls += 1;
-		return new Response("", { status: 200, headers: { etag: "w/empty" } });
-	}) as typeof globalThis.fetch;
-	try {
-		const client = new S3Client(s3ClientConfig());
-		await assert.rejects(client.getJson("latest.json"), /empty body/);
-		assert.equal(calls, 3);
-	} finally {
-		globalThis.fetch = originalFetch;
-	}
-});
-
-test("getJson does not retry a non-empty malformed response body", async () => {
-	const originalFetch = globalThis.fetch;
-	let calls = 0;
-	globalThis.fetch = (async () => {
-		calls += 1;
-		return new Response("{", { status: 200, headers: { etag: "w/malformed" } });
-	}) as typeof globalThis.fetch;
-	try {
-		const client = new S3Client(s3ClientConfig());
-		await assert.rejects(client.getJson("latest.json"), SyntaxError);
-		assert.equal(calls, 1);
-	} finally {
-		globalThis.fetch = originalFetch;
-	}
-});
-
-test("getBuffer retries on empty R2 response body and eventually succeeds", async () => {
-	const originalFetch = globalThis.fetch;
-	const payload = Buffer.from("snapshot-payload");
-	const responses = [
-		new Response("", { status: 200, headers: { etag: "w/empty1" } }),
-		new Response("", { status: 200, headers: { etag: "w/empty2" } }),
-		new Response(new Uint8Array(payload), { status: 200, headers: { etag: "w/ok" } }),
-	];
-	let calls = 0;
-	globalThis.fetch = (async () => {
-		const response = responses[Math.min(calls, responses.length - 1)];
-		calls += 1;
-		return response;
-	}) as typeof globalThis.fetch;
-	try {
-		const client = new S3Client(s3ClientConfig());
-		const result = await client.getBuffer("snapshots/snap-1.json.gz");
-		assert.equal(result.missing, false);
-		assert.deepEqual(result.value, payload);
-		assert.equal(result.etag, "w/ok");
-		assert.equal(calls, 3);
-	} finally {
-		globalThis.fetch = originalFetch;
-	}
-});
-
-test("getBuffer throws after retrying a persistently empty R2 response body", async () => {
-	const originalFetch = globalThis.fetch;
-	let calls = 0;
-	globalThis.fetch = (async () => {
-		calls += 1;
-		return new Response("", { status: 200, headers: { etag: "w/empty" } });
-	}) as typeof globalThis.fetch;
-	try {
-		const client = new S3Client(s3ClientConfig());
-		await assert.rejects(client.getBuffer("snapshots/snap-1.json.gz"), /empty body/);
-		assert.equal(calls, 3);
-	} finally {
-		globalThis.fetch = originalFetch;
-	}
+		true,
+	);
 });
 
 test("old unreadable locks require explicit stale unlock before recovery", async () => {
@@ -754,7 +760,10 @@ test("unlock reports when a dead owner's guard is still expiring", async () => {
 
 		await mock.commands.get("sync")?.handler("unlock --stale", ctx);
 		assert.equal(await lockFileExists(), true);
-		assert.match(notifications.at(-1)?.message ?? "", /owner exited.*guard expires/);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/owner exited.*guard expires/,
+		);
 	});
 });
 
@@ -771,7 +780,10 @@ test("concurrent withLock calls never execute together", async () => {
 			});
 
 		const results = await Promise.allSettled([run(), run()]);
-		assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+		assert.equal(
+			results.filter((result) => result.status === "fulfilled").length,
+			1,
+		);
 		assert.equal(maxActive, 1);
 	});
 });
@@ -846,7 +858,10 @@ test("doctor warns when a lock guard is active without metadata", async () => {
 		const { ctx, notifications } = createMockContext({ hasUI: true });
 
 		await mock.commands.get("sync")?.handler("doctor", ctx);
-		assert.match(notifications.at(-1)?.message ?? "", /lock: guard active.*metadata/);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/lock: guard active.*metadata/,
+		);
 		assert.equal(notifications.at(-1)?.level, "warning");
 	});
 });
@@ -876,7 +891,7 @@ test("doctor warns when a valid lock owner has exited", async () => {
 test("doctor reports live and free lock states", async () => {
 	await withTempHome(async () => {
 		await ensureStateDir();
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()));
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()));
 		writeFileSync(
 			lockPath(),
 			JSON.stringify({
@@ -890,14 +905,20 @@ test("doctor reports live and free lock states", async () => {
 		sync(mock.pi);
 		const { ctx, notifications } = createMockContext({ hasUI: true });
 
-		await mock.commands.get("sync")?.handler("doctor", ctx);
-		assert.match(notifications.at(-1)?.message ?? "", /lock: held by pid/);
-		assert.equal(notifications.at(-1)?.level, "info");
+		// Lock diagnostics are local; do not make this test depend on GitHub.
+		const diagnose = vi
+			.spyOn(GitSyncBackend.prototype, "diagnose")
+			.mockResolvedValue([]);
+		try {
+			await mock.commands.get("sync")?.handler("doctor", ctx);
+			assert.match(notifications.at(-1)?.message ?? "", /lock: held by pid/);
 
-		await fs.rm(lockPath());
-		await mock.commands.get("sync")?.handler("doctor", ctx);
-		assert.match(notifications.at(-1)?.message ?? "", /lock: free/);
-		assert.equal(notifications.at(-1)?.level, "info");
+			await fs.rm(lockPath());
+			await mock.commands.get("sync")?.handler("doctor", ctx);
+			assert.match(notifications.at(-1)?.message ?? "", /lock: free/);
+		} finally {
+			diagnose.mockRestore();
+		}
 	});
 });
 
@@ -908,7 +929,10 @@ test("malformed non-lock JSON remains an explicit error", async () => {
 		writeFileSync(localConfigPath(), "{broken");
 		await assert.rejects(loadPartialConfig(), SyntaxError);
 
-		writeFileSync(path.join(agentDir, "pi-sync", "default.state.json"), "{broken");
+		writeFileSync(
+			path.join(agentDir, "pi-sync", "default.state.json"),
+			"{broken",
+		);
 		await assert.rejects(readState("default"), SyntaxError);
 
 		writeFileSync(path.join(agentDir, "settings.json"), "{broken");

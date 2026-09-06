@@ -12,7 +12,6 @@
 
 - Keep snapshot content IDs, backend snapshot references, and backend-scoped opaque revisions distinct.
 - Make `--force` reread and republish against the observed revision rather than disabling concurrency checks.
-- Preserve temporary-credential support for Cloudflare R2, but retry once without `X-Amz-Security-Token` when static keys reject that header.
 - When pull replaces a file ancestor with a directory, defer descendant preflight until ancestor deletion and journal `ENOTDIR` descendants as missing so rollback restores the file.
 
 ## Git subprocesses
@@ -22,5 +21,5 @@
 
 ## Interaction model
 
-- Collect credentials in a masked TUI and review one exact backend path during setup.
+- Use existing non-interactive Git authentication and review one exact repository, branch, and path during setup.
 - Expose storage connections and sync setups as the only managed user concepts.

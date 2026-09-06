@@ -14,12 +14,19 @@ export function normalizeGitRemote(value: string | undefined) {
 	}
 	if (
 		!normalized.includes("://") &&
-		/^(?:[A-Za-z0-9._-]+@)?(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):(?!-)[^:].+$/u.test(normalized)
+		/^(?:[A-Za-z0-9._-]+@)?(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):(?!-)[^:].+$/u.test(
+			normalized,
+		)
 	) {
 		return normalized;
 	}
-	if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(normalized) && !normalized.includes("://")) {
-		throw new Error("Invalid pi-sync Git remote: unsupported transport or remote-helper syntax.");
+	if (
+		/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(normalized) &&
+		!normalized.includes("://")
+	) {
+		throw new Error(
+			"Invalid pi-sync Git remote: unsupported transport or remote-helper syntax.",
+		);
 	}
 	let url: URL;
 	try {
@@ -28,12 +35,22 @@ export function normalizeGitRemote(value: string | undefined) {
 		throw new Error("Invalid pi-sync Git remote: use an SSH or HTTPS remote.");
 	}
 	if (url.protocol !== "https:" && url.protocol !== "ssh:") {
-		throw new Error("Invalid pi-sync Git remote: only SSH and HTTPS are supported.");
+		throw new Error(
+			"Invalid pi-sync Git remote: only SSH and HTTPS are supported.",
+		);
 	}
 	if (url.password || (url.protocol === "https:" && url.username)) {
-		throw new Error("Invalid pi-sync Git remote: URL credentials or userinfo are not allowed.");
+		throw new Error(
+			"Invalid pi-sync Git remote: URL credentials or userinfo are not allowed.",
+		);
 	}
-	if (url.search || url.hash || !url.hostname || !url.pathname || url.pathname === "/") {
+	if (
+		url.search ||
+		url.hash ||
+		!url.hostname ||
+		!url.pathname ||
+		url.pathname === "/"
+	) {
 		throw new Error("Invalid pi-sync Git remote.");
 	}
 	return url.toString();
@@ -80,7 +97,10 @@ export function normalizeGitBranch(value: string | undefined) {
 		/[ ~^:?*[\]]/u.test(branch) ||
 		branch
 			.split("/")
-			.some((segment) => !segment || segment.startsWith(".") || segment.endsWith(".lock"))
+			.some(
+				(segment) =>
+					!segment || segment.startsWith(".") || segment.endsWith(".lock"),
+			)
 	) {
 		throw new Error("Invalid pi-sync Git branch.");
 	}
@@ -89,7 +109,9 @@ export function normalizeGitBranch(value: string | undefined) {
 
 export function normalizeGitDirectory(value: string | undefined) {
 	if (value?.trim() === "." || value?.trim() === "./") return "./";
-	const directory = trimSlashes(normalizeOptionalString(value) ?? DEFAULT_GIT_DIRECTORY);
+	const directory = trimSlashes(
+		normalizeOptionalString(value) ?? DEFAULT_GIT_DIRECTORY,
+	);
 	if (
 		!directory ||
 		directory.startsWith("-") ||
@@ -97,7 +119,10 @@ export function normalizeGitDirectory(value: string | undefined) {
 		hasControlCharacter(directory) ||
 		directory
 			.split("/")
-			.some((segment) => !segment || segment === "." || segment === ".." || segment === ".git")
+			.some(
+				(segment) =>
+					!segment || segment === "." || segment === ".." || segment === ".git",
+			)
 	) {
 		throw new Error("Invalid pi-sync Git directory.");
 	}

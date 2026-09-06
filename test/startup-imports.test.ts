@@ -8,7 +8,8 @@ import { withTempHome } from "./helpers.js";
 async function waitFor(predicate: () => boolean): Promise<void> {
 	const deadline = Date.now() + 1_000;
 	while (!predicate()) {
-		if (Date.now() >= deadline) throw new Error("Timed out waiting for Sync loader readiness");
+		if (Date.now() >= deadline)
+			throw new Error("Timed out waiting for Sync loader readiness");
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
 }

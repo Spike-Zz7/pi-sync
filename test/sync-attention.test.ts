@@ -6,7 +6,10 @@ import { createSyncAttentionController } from "../src/sync-attention.js";
 
 test("attention presentation is sanitized, textual, bounded, and clearable", () => {
 	const controller = createSyncAttentionController();
-	const { ctx, statuses, widgets } = createMockContext({ hasUI: true, mode: "tui" });
+	const { ctx, statuses, widgets } = createMockContext({
+		hasUI: true,
+		mode: "tui",
+	});
 	controller.set(
 		{
 			setupName: "home\u001b]8;;spoof",

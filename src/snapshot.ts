@@ -1,19 +1,24 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Dirent } from "node:fs";
+import { createReadStream, type Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { agentDir, configuredSessionDir } from "./config.js";
-import { isDeniedPath, posixJoin, safeJoin, toPosix } from "./paths.js";
-import { sessionStorageRoot } from "./snapshot-paths.js";
+import {
+	isDeniedPath,
+	posixJoin,
+	safeJoin,
+	sessionStorageRoot,
+	toPosix,
+} from "./paths.js";
 
-export { isDeniedPath } from "./paths.js";
-export { sessionStorageRoot } from "./snapshot-paths.js";
+export { isDeniedPath, sessionStorageRoot } from "./paths.js";
 
 import {
+	BUILT_IN_SYNC_ROOTS,
 	canonicalSnapshotPathForConfig,
 	customIncludePathsByLower,
-	DEFAULT_SYNC_INCLUDE,
 	includeFromSelectionConfig,
 	isConfiguredSnapshotPath,
 	isPreservableUnmanagedSnapshotPath,
@@ -26,23 +31,35 @@ import {
 } from "./sync-policy.js";
 import type { Snapshot, SnapshotFile, SnapshotOptions } from "./types.js";
 
-export { canonicalSnapshotPathForConfig, isConfiguredSnapshotPath } from "./sync-policy.js";
+export {
+	canonicalSnapshotPathForConfig,
+	isConfiguredSnapshotPath,
+} from "./sync-policy.js";
 
 const VERSION = 1;
-const TOP_LEVEL_FILES: readonly string[] = DEFAULT_SYNC_INCLUDE.filter((name) =>
+const TOP_LEVEL_FILES: readonly string[] = BUILT_IN_SYNC_ROOTS.filter((name) =>
 	name.includes("."),
 );
-const TOP_LEVEL_DIRS = new Set<string>(DEFAULT_SYNC_INCLUDE.filter((name) => !name.includes(".")));
+const TOP_LEVEL_DIRS = new Set<string>(
+	BUILT_IN_SYNC_ROOTS.filter((name) => !name.includes(".")),
+);
 const SECRET_PATTERNS = [
 	/AWS_SECRET_ACCESS_KEY\s*[=:]\s*['"]?[A-Za-z0-9/+]{35,}/i,
-	/(ANTHROPIC|OPENAI|GEMINI|GOOGLE|FIRECRAWL|GITHUB|CLOUDFLARE|R2|S3)_[A-Z0-9_]*(KEY|TOKEN|SECRET)\s*[=:]\s*['"]?[^\s'"]{12,}/i,
+	/(ANTHROPIC|OPENAI|GEMINI|GOOGLE|FIRECRAWL|GITHUB)_[A-Z0-9_]*(KEY|TOKEN|SECRET)\s*[=:]\s*['"]?[^\s'"]{12,}/i,
 	/sk-ant-[A-Za-z0-9_-]{20,}/,
-	/sk-[A-Za-z0-9]{20,}/,
+	/sk-(?:proj-|admin-|svcacct-)?[A-Za-z0-9_-]{20,}/,
 	/gh[pousr]_[A-Za-z0-9_]{20,}/,
+	/github_pat_[A-Za-z0-9_]{22,}/,
+	/AIzaSy[A-Za-z0-9_-]{33}/,
+	/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/,
+	/xox[baprs]-[A-Za-z0-9_-]{10,}/,
+	/glpat-[A-Za-z0-9_-]{20,}/,
 ];
 
 function selectTopLevelFileEntry(entries: Dirent[], fileName: string) {
-	const exact = entries.find((entry) => entry.isFile() && entry.name === fileName);
+	const exact = entries.find(
+		(entry) => entry.isFile() && entry.name === fileName,
+	);
 	if (exact) return exact;
 	const lower = fileName.toLowerCase();
 	return entries
@@ -69,13 +86,22 @@ function isSafeSnapshotPath(relativePath: string) {
 }
 
 function snapshotsMatch(left: Snapshot, right: Snapshot) {
-	const leftHashes = new Map(left.files.map((file) => [file.path, file.sha256]));
-	const rightHashes = new Map(right.files.map((file) => [file.path, file.sha256]));
+	const leftHashes = new Map(
+		left.files.map((file) => [file.path, file.sha256]),
+	);
+	const rightHashes = new Map(
+		right.files.map((file) => [file.path, file.sha256]),
+	);
 	return (
 		left.syncSessions === right.syncSessions &&
-		sameOptionalInclude(snapshotSelectionInclude(left), snapshotSelectionInclude(right)) &&
+		sameOptionalInclude(
+			snapshotSelectionInclude(left),
+			snapshotSelectionInclude(right),
+		) &&
 		leftHashes.size === rightHashes.size &&
-		[...leftHashes].every(([filePath, hash]) => rightHashes.get(filePath) === hash)
+		[...leftHashes].every(
+			([filePath, hash]) => rightHashes.get(filePath) === hash,
+		)
 	);
 }
 
@@ -97,6 +123,11 @@ export async function createSnapshot(
 	options: SnapshotOptions = {},
 ): Promise<Snapshot> {
 	const include = effectiveInclude(options);
+	if (include.includes("token-usage.jsonl")) {
+		await refreshTokenUsageLedger(
+			options.sessionDir ?? (await configuredSessionDir()),
+		);
+	}
 	const syncSessions = include.includes("sessions");
 	const files = await collectFiles(agentDir(), {
 		include,
@@ -112,6 +143,151 @@ export async function createSnapshot(
 		selection: selectionForSnapshot(include),
 		files,
 	};
+}
+
+interface TokenUsageRecord {
+	id: string;
+	timestamp: number;
+	provider: string;
+	model: string;
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	totalTokens: number;
+	costUSD: number;
+}
+
+export async function refreshTokenUsageLedger(
+	sessionDirectory?: string,
+): Promise<void> {
+	try {
+		const targetDir = agentDir();
+		const sessionsDir = sessionDirectory ?? (await configuredSessionDir());
+		const ledgerPath = path.join(targetDir, "token-usage.jsonl");
+
+		const records = new Map<string, TokenUsageRecord>();
+		try {
+			const stream = createReadStream(ledgerPath, { encoding: "utf8" });
+			const lines = createInterface({ input: stream, crlfDelay: Infinity });
+			for await (const line of lines) {
+				const trimmed = line.trim();
+				if (!trimmed) continue;
+				try {
+					const parsed = JSON.parse(trimmed) as Partial<TokenUsageRecord>;
+					if (
+						typeof parsed.id === "string" &&
+						typeof parsed.timestamp === "number"
+					) {
+						records.set(parsed.id, parsed as TokenUsageRecord);
+					}
+				} catch {}
+			}
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
+		}
+
+		let hasNew = false;
+		async function scanDir(current: string) {
+			let entries: Dirent[];
+			try {
+				entries = await fs.readdir(current, { withFileTypes: true });
+			} catch {
+				return;
+			}
+			for (const entry of entries) {
+				const full = path.join(current, entry.name);
+				if (entry.isDirectory()) {
+					await scanDir(full);
+				} else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+					try {
+						const stream = createReadStream(full, { encoding: "utf8" });
+						const lines = createInterface({
+							input: stream,
+							crlfDelay: Infinity,
+						});
+						for await (const line of lines) {
+							if (!line.includes('"usage"')) continue;
+							try {
+								const parsed = JSON.parse(line) as Record<string, unknown>;
+								if (parsed.type !== "message") continue;
+								const msg = parsed.message as
+									| Record<string, unknown>
+									| undefined;
+								if (msg?.role !== "assistant" || !msg.usage) continue;
+								const id =
+									typeof parsed.id === "string" && parsed.id
+										? parsed.id
+										: undefined;
+								if (!id || records.has(id)) continue;
+								const usage = msg.usage as Record<string, unknown>;
+								const cost = usage.cost as Record<string, unknown> | undefined;
+								records.set(id, {
+									id,
+									timestamp:
+										typeof parsed.timestamp === "number"
+											? parsed.timestamp
+											: typeof parsed.timestamp === "string"
+												? Date.parse(parsed.timestamp) || Date.now()
+												: Date.now(),
+									provider:
+										typeof msg.provider === "string" ? msg.provider : "unknown",
+									model: typeof msg.model === "string" ? msg.model : "unknown",
+									inputTokens:
+										typeof usage.input === "number" && usage.input >= 0
+											? usage.input
+											: 0,
+									outputTokens:
+										typeof usage.output === "number" && usage.output >= 0
+											? usage.output
+											: 0,
+									cacheReadTokens:
+										typeof usage.cacheRead === "number" && usage.cacheRead >= 0
+											? usage.cacheRead
+											: 0,
+									cacheWriteTokens:
+										typeof usage.cacheWrite === "number" &&
+										usage.cacheWrite >= 0
+											? usage.cacheWrite
+											: 0,
+									totalTokens:
+										typeof usage.totalTokens === "number" &&
+										usage.totalTokens >= 0
+											? usage.totalTokens
+											: 0,
+									costUSD:
+										typeof cost?.total === "number" && cost.total >= 0
+											? cost.total
+											: 0,
+								});
+								hasNew = true;
+							} catch {}
+						}
+					} catch {}
+				}
+			}
+		}
+
+		if (sessionsDir) await scanDir(sessionsDir);
+
+		if (hasNew && records.size > 0) {
+			const sorted = [...records.values()].sort(
+				(a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id),
+			);
+			const tempPath = `${ledgerPath}.tmp.${process.pid}.${Date.now()}`;
+			const content = sorted.map((r) => `${JSON.stringify(r)}\n`).join("");
+			await fs.writeFile(tempPath, content, { encoding: "utf8", mode: 0o600 });
+			try {
+				await fs.rename(tempPath, ledgerPath);
+			} catch {
+				try {
+					await fs.unlink(tempPath);
+				} catch {}
+			}
+		}
+	} catch {
+		// Non-fatal
+	}
 }
 
 function effectiveInclude(options: SnapshotOptions) {
@@ -132,7 +308,11 @@ export async function collectFiles(
 	const selection = syncIncludeSelection(effectiveInclude(options));
 	const selectedFiles = new Set<string>(selection.builtIns);
 	for (const entry of entries) {
-		if (entry.isDirectory() && TOP_LEVEL_DIRS.has(entry.name) && selectedFiles.has(entry.name)) {
+		if (
+			entry.isDirectory() &&
+			TOP_LEVEL_DIRS.has(entry.name) &&
+			selectedFiles.has(entry.name)
+		) {
 			await collectDirectory(results, root, entry.name);
 		}
 	}
@@ -146,10 +326,15 @@ export async function collectFiles(
 	}
 	if (selection.sessions) {
 		try {
-			await collectDirectory(results, sessionStorageRoot(root, options.sessionDir), "", {
-				sessionsOnly: true,
-				virtualPrefix: "sessions",
-			});
+			await collectDirectory(
+				results,
+				sessionStorageRoot(root, options.sessionDir),
+				"",
+				{
+					sessionsOnly: true,
+					virtualPrefix: "sessions",
+				},
+			);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
@@ -157,12 +342,17 @@ export async function collectFiles(
 	return results.sort((left, right) => left.path.localeCompare(right.path));
 }
 
-async function collectIncludedPath(results: SnapshotFile[], root: string, relativePath: string) {
+async function collectIncludedPath(
+	results: SnapshotFile[],
+	root: string,
+	relativePath: string,
+) {
 	const absolutePath = safeJoin(root, relativePath);
 	try {
 		const stat = await fs.lstat(absolutePath);
 		if (stat.isFile()) await addFile(results, root, relativePath);
-		else if (stat.isDirectory()) await collectDirectory(results, root, relativePath);
+		else if (stat.isDirectory())
+			await collectDirectory(results, root, relativePath);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		if (!relativePath.includes("/")) {
@@ -180,15 +370,22 @@ async function collectDirectory(
 	options: { sessionsOnly?: boolean; virtualPrefix?: string } = {},
 ) {
 	const absoluteDirectory = path.join(root, relativeDirectory);
-	for (const entry of await fs.readdir(absoluteDirectory, { withFileTypes: true })) {
-		const relativePath = relativeDirectory ? posixJoin(relativeDirectory, entry.name) : entry.name;
+	for (const entry of await fs.readdir(absoluteDirectory, {
+		withFileTypes: true,
+	})) {
+		const relativePath = relativeDirectory
+			? posixJoin(relativeDirectory, entry.name)
+			: entry.name;
 		const snapshotPath = options.virtualPrefix
 			? posixJoin(options.virtualPrefix, relativePath)
 			: relativePath;
 		if (isDeniedPath(snapshotPath)) continue;
 		if (entry.isDirectory()) {
 			await collectDirectory(results, root, relativePath, options);
-		} else if (entry.isFile() && (!options.sessionsOnly || isSessionFilePath(snapshotPath))) {
+		} else if (
+			entry.isFile() &&
+			(!options.sessionsOnly || isSessionFilePath(snapshotPath))
+		) {
 			await addFile(results, root, relativePath, snapshotPath);
 		}
 	}
@@ -224,16 +421,27 @@ export function sessionSnapshotPathFromAbsolute(
 	configuredSessionDir?: string,
 ) {
 	const relativePath = toPosix(
-		path.relative(sessionStorageRoot(agentDir(), configuredSessionDir), sessionFile),
+		path.relative(
+			sessionStorageRoot(agentDir(), configuredSessionDir),
+			sessionFile,
+		),
 	);
-	if (!relativePath || relativePath.startsWith("../") || path.posix.isAbsolute(relativePath)) {
+	if (
+		!relativePath ||
+		relativePath.startsWith("../") ||
+		path.posix.isAbsolute(relativePath)
+	) {
 		return undefined;
 	}
 	const snapshotPath = posixJoin("sessions", relativePath);
 	return isSessionFilePath(snapshotPath) ? snapshotPath : undefined;
 }
 
-export function snapshotTarget(root: string, relativePath: string, configuredSessionDir?: string) {
+export function snapshotTarget(
+	root: string,
+	relativePath: string,
+	configuredSessionDir?: string,
+) {
 	if (isSessionPath(relativePath)) {
 		return safeJoin(
 			sessionStorageRoot(root, configuredSessionDir),
@@ -262,9 +470,14 @@ export function filterSnapshotForConfigPolicy(
 		...snapshot,
 		syncSessions: include.includes("sessions") ? snapshot.syncSessions : false,
 		selection: selectionForSnapshot(include),
-		files: canonicalizeSnapshotFilesForConfig(snapshot.files, config, includePaths),
+		files: canonicalizeSnapshotFilesForConfig(
+			snapshot.files,
+			config,
+			includePaths,
+		),
 	};
-	if (!options.regenerateId || snapshotsMatch(snapshot, filtered)) return filtered;
+	if (!options.regenerateId || snapshotsMatch(snapshot, filtered))
+		return filtered;
 	return {
 		...filtered,
 		id: snapshotId(),
@@ -285,14 +498,22 @@ function canonicalizeSnapshotFilesForConfig(
 	>();
 	for (const file of files) {
 		const normalized = toPosix(file.path);
-		if (!isSafeSnapshotPath(file.path) || !isConfiguredSnapshotPath(normalized, config)) {
+		if (
+			!isSafeSnapshotPath(file.path) ||
+			!isConfiguredSnapshotPath(normalized, config)
+		) {
 			continue;
 		}
 		if (normalized.includes("/")) {
-			configuredFiles.push(normalized === file.path ? file : { ...file, path: normalized });
+			configuredFiles.push(
+				normalized === file.path ? file : { ...file, path: normalized },
+			);
 			continue;
 		}
-		const topLevelPath = canonicalSnapshotPathForConfig(normalized, includePaths);
+		const topLevelPath = canonicalSnapshotPathForConfig(
+			normalized,
+			includePaths,
+		);
 		const candidate = {
 			exact: normalized === topLevelPath,
 			file: { ...file, path: topLevelPath },
@@ -319,7 +540,9 @@ function isPreferredExtraCandidate(
 
 export function snapshotWithoutSessions(snapshot: Snapshot) {
 	const files = snapshot.files.filter((file) => !isSessionPath(file.path));
-	const include = snapshotSelectionInclude(snapshot)?.filter((item) => item !== "sessions");
+	const include = snapshotSelectionInclude(snapshot)?.filter(
+		(item) => item !== "sessions",
+	);
 	if (
 		files.length === snapshot.files.length &&
 		snapshot.syncSessions !== true &&
@@ -359,7 +582,9 @@ export function mergeRemotePreservedFiles(
 	remote: Snapshot,
 	config: SyncSelectionConfig,
 ) {
-	const localPathNames = new Set(local.files.map((file) => file.path.toLowerCase()));
+	const localPathNames = new Set(
+		local.files.map((file) => file.path.toLowerCase()),
+	);
 	const preservedPathNames = new Set<string>();
 	const preserved = remote.files.filter((file) => {
 		const normalized = toPosix(file.path);
@@ -382,7 +607,8 @@ export function mergeRemotePreservedFiles(
 		id: snapshotId(),
 		createdAt: new Date().toISOString(),
 		machine: os.hostname(),
-		syncSessions: snapshotIncludesSessions(local) || snapshotIncludesSessions(remote),
+		syncSessions:
+			snapshotIncludesSessions(local) || snapshotIncludesSessions(remote),
 		files: [...local.files, ...preserved].sort((left, right) =>
 			left.path.localeCompare(right.path),
 		),
@@ -394,7 +620,8 @@ export function mergeRemoteSessionFiles(local: Snapshot, remote: Snapshot) {
 		const normalized = toPosix(file.path);
 		return isSessionFilePath(normalized) && isSafeSnapshotPath(file.path);
 	});
-	if (remoteSessions.length === 0 && !snapshotIncludesSessions(remote)) return local;
+	if (remoteSessions.length === 0 && !snapshotIncludesSessions(remote))
+		return local;
 	const localInclude = snapshotSelectionInclude(local);
 	return {
 		...local,
@@ -405,17 +632,26 @@ export function mergeRemoteSessionFiles(local: Snapshot, remote: Snapshot) {
 		...(localInclude
 			? {
 					selection: selectionForSnapshot(
-						localInclude.includes("sessions") ? localInclude : [...localInclude, "sessions"],
+						localInclude.includes("sessions")
+							? localInclude
+							: [...localInclude, "sessions"],
 					),
 				}
 			: {}),
-		files: [...local.files.filter((file) => !isSessionPath(file.path)), ...remoteSessions].sort(
-			(left, right) => left.path.localeCompare(right.path),
-		),
+		files: [
+			...local.files.filter((file) => !isSessionPath(file.path)),
+			...remoteSessions,
+		].sort((left, right) => left.path.localeCompare(right.path)),
 	};
 }
 
-function sameOptionalInclude(left: string[] | undefined, right: string[] | undefined) {
+function sameOptionalInclude(
+	left: string[] | undefined,
+	right: string[] | undefined,
+) {
 	if (!left || !right) return left === right;
-	return left.length === right.length && left.every((item, index) => item === right[index]);
+	return (
+		left.length === right.length &&
+		left.every((item, index) => item === right[index])
+	);
 }

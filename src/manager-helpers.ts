@@ -1,29 +1,4 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { isCloudflareR2Endpoint } from "./config.js";
-
-export async function requiredExistingBucket(
-	ctx: ExtensionCommandContext,
-	example: string,
-	signal?: AbortSignal,
-) {
-	const value = await ctx.ui.input(
-		`Existing bucket\n\nThe bucket must already exist; pi-sync will not create it.\nExample: ${safeTerminalText(example)}`,
-		undefined,
-		{ signal },
-	);
-	if (signal?.aborted) {
-		throw signal.reason instanceof Error
-			? signal.reason
-			: new DOMException("The operation was aborted", "AbortError");
-	}
-	if (value === undefined) return undefined;
-	const normalized = value.trim();
-	if (!normalized) {
-		ctx.ui.notify("Enter the name of an existing R2/S3 bucket, or cancel setup.", "warning");
-		return undefined;
-	}
-	return normalized;
-}
 
 export async function requiredInput(
 	ctx: ExtensionCommandContext,
@@ -31,7 +6,9 @@ export async function requiredInput(
 	defaultValue: string,
 	signal?: AbortSignal,
 ) {
-	return withoutPlaceholder(await promptTextInput(ctx, title, { defaultValue }, signal));
+	return withoutPlaceholder(
+		await promptTextInput(ctx, title, { defaultValue }, signal),
+	);
 }
 
 export async function requiredValueInput(
@@ -40,7 +17,9 @@ export async function requiredValueInput(
 	example: string,
 	signal?: AbortSignal,
 ) {
-	return withoutPlaceholder(await promptTextInput(ctx, title, { example }, signal));
+	return withoutPlaceholder(
+		await promptTextInput(ctx, title, { example }, signal),
+	);
 }
 
 // Text collection does not impose backend-specific syntax; callers validate the returned value.
@@ -56,7 +35,9 @@ export async function promptTextInput(
 		options.defaultValue !== undefined
 			? `Default: ${safeTerminalText(options.defaultValue)} (leave blank to keep)`
 			: `Example: ${safeTerminalText(options.example ?? "")}\nEnter your own value; this example is not a default.`;
-	const value = await ctx.ui.input(`${title}\n\n${hint}`, undefined, { signal });
+	const value = await ctx.ui.input(`${title}\n\n${hint}`, undefined, {
+		signal,
+	});
 	if (signal?.aborted) {
 		throw signal.reason instanceof Error
 			? signal.reason
@@ -72,18 +53,8 @@ export async function promptTextInput(
 }
 
 function withoutPlaceholder(value: string | undefined) {
-	// Preserve the existing Git/S3 placeholder policy; WebDAV permits literal angle brackets.
+	// Preserve the existing Git placeholder policy.
 	return value?.includes("<") || value?.includes(">") ? undefined : value;
-}
-
-export function storageDescription(
-	kind: string | undefined,
-	endpoint: string | undefined,
-	bucket: string | undefined,
-) {
-	const label =
-		kind === "r2" || isCloudflareR2Endpoint(endpoint) ? "Cloudflare R2" : "S3-compatible";
-	return `${label} · ${safeTerminalText(bucket ?? "bucket missing")}`;
 }
 
 export function ownRecord(value: unknown): Record<string, unknown> | undefined {

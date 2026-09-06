@@ -1,20 +1,72 @@
 import path from "node:path";
+import { syncConfigReviewFingerprint } from "./config.js";
+import { safeTerminalText } from "./manager-helpers.js";
 import { isDeniedPath, toPosix } from "./paths.js";
-import type { Snapshot, SnapshotSelection } from "./types.js";
+import type { AnySyncConfig, Snapshot, SnapshotSelection } from "./types.js";
 
 export const BUILT_IN_SYNC_ROOTS = [
 	"settings.json",
 	"keybindings.json",
 	"models.json",
+	"lsp.json",
 	"AGENTS.md",
 	"APPEND_SYSTEM.md",
 	"skills",
 	"prompts",
 	"themes",
 	"extensions",
+	"token-usage.jsonl",
 ] as const;
 
-export const DEFAULT_SYNC_INCLUDE = [...BUILT_IN_SYNC_ROOTS] as const;
+export interface IncludedContentCategory {
+	readonly id: string;
+	readonly label: string;
+	readonly paths: readonly string[];
+	readonly description: string;
+}
+
+export const PRIMARY_CATEGORIES = [
+	{
+		id: "category:preferences",
+		label: "Preferences",
+		paths: ["settings.json", "keybindings.json"] as const,
+		description:
+			"Global settings and key shortcuts (settings.json, keybindings.json)",
+	},
+	{
+		id: "category:instructions-prompts",
+		label: "Instructions & prompts",
+		paths: ["AGENTS.md", "APPEND_SYSTEM.md", "prompts"] as const,
+		description:
+			"Agent instructions, appended system prompt, and prompt templates (AGENTS.md, APPEND_SYSTEM.md, prompts)",
+	},
+	{
+		id: "category:skills",
+		label: "Skills",
+		paths: ["skills"] as const,
+		description: "Agent skills directory (custom tools and workflows)",
+	},
+	{
+		id: "category:usage-records",
+		label: "Usage records",
+		paths: ["token-usage.jsonl"] as const,
+		description:
+			"Token usage ledger (pi-token-usage metadata without chat text)",
+	},
+] as const;
+
+export const RECOMMENDED_SYNC_INCLUDE = [
+	"settings.json",
+	"keybindings.json",
+	"AGENTS.md",
+	"APPEND_SYSTEM.md",
+	"prompts",
+	"skills",
+	"token-usage.jsonl",
+] as const;
+
+export const DEFAULT_SYNC_INCLUDE = [...RECOMMENDED_SYNC_INCLUDE] as const;
+export const LEGACY_DEFAULT_SYNC_INCLUDE = [...BUILT_IN_SYNC_ROOTS] as const;
 export type BuiltInSyncFile = (typeof BUILT_IN_SYNC_ROOTS)[number];
 const SNAPSHOT_SELECTION_VERSION = 1;
 const MAX_SYNC_INCLUDE_ITEMS = 1_024;
@@ -30,15 +82,17 @@ const BUILT_IN_BY_LOWER = new Map<string, BuiltInSyncFile>(
 	BUILT_IN_SYNC_ROOTS.map((fileName) => [fileName.toLowerCase(), fileName]),
 );
 const TOP_LEVEL_FILE_PATHS = new Map<string, string>(
-	BUILT_IN_SYNC_ROOTS.filter((fileName) => fileName.includes(".")).map((fileName) => [
-		fileName.toLowerCase(),
-		fileName,
-	]),
+	BUILT_IN_SYNC_ROOTS.filter((fileName) => fileName.includes(".")).map(
+		(fileName) => [fileName.toLowerCase(), fileName],
+	),
 );
 const TOP_LEVEL_DIRS = new Set<string>(
 	BUILT_IN_SYNC_ROOTS.filter((fileName) => !fileName.includes(".")),
 );
-const RESERVED_TOP_LEVEL_NAMES = new Set<string>([...BUILT_IN_BY_LOWER.keys(), "sessions"]);
+const RESERVED_TOP_LEVEL_NAMES = new Set<string>([
+	...BUILT_IN_BY_LOWER.keys(),
+	"sessions",
+]);
 
 export function normalizeSyncInclude(value: unknown): string[] {
 	if (!Array.isArray(value)) {
@@ -55,7 +109,9 @@ export function normalizeSyncInclude(value: unknown): string[] {
 	let totalBytes = 0;
 	for (const item of value) {
 		if (typeof item !== "string") {
-			throw new Error("Invalid pi-sync settings: sync.include items must be strings.");
+			throw new Error(
+				"Invalid pi-sync settings: sync.include items must be strings.",
+			);
 		}
 		const itemBytes = Buffer.byteLength(item, "utf8");
 		if (itemBytes > MAX_SYNC_INCLUDE_PATH_BYTES) {
@@ -71,11 +127,15 @@ export function normalizeSyncInclude(value: unknown): string[] {
 		}
 		const trimmed = item.trim();
 		const builtIn = BUILT_IN_BY_LOWER.get(trimmed.toLowerCase());
-		const normalized = builtIn ?? (trimmed.toLowerCase() === "sessions" ? "sessions" : trimmed);
-		if (!builtIn && normalized !== "sessions") validateAgentRelativeInclude(normalized);
+		const normalized =
+			builtIn ?? (trimmed.toLowerCase() === "sessions" ? "sessions" : trimmed);
+		if (!builtIn && normalized !== "sessions")
+			validateAgentRelativeInclude(normalized);
 		const identity = normalized.toLowerCase();
 		if (seen.has(identity)) {
-			throw new Error(`Invalid pi-sync settings: duplicate sync.include item: ${item}`);
+			throw new Error(
+				`Invalid pi-sync settings: duplicate sync.include item: ${item}`,
+			);
 		}
 		addIncludePath(pathRoot, identity, item);
 		seen.add(identity);
@@ -84,7 +144,11 @@ export function normalizeSyncInclude(value: unknown): string[] {
 	return result;
 }
 
-function addIncludePath(root: IncludePathNode, identity: string, source: string) {
+function addIncludePath(
+	root: IncludePathNode,
+	identity: string,
+	source: string,
+) {
 	let node = root;
 	for (const segment of identity.split("/")) {
 		if (node.selected !== undefined) throwOverlappingInclude(source);
@@ -151,14 +215,19 @@ export function portableSnapshotSelection(value: unknown): SnapshotSelection {
 	};
 }
 
-export function snapshotSelectionInclude(snapshot: Pick<Snapshot, "selection">) {
+export function snapshotSelectionInclude(
+	snapshot: Pick<Snapshot, "selection">,
+) {
 	return snapshot.selection === undefined
 		? undefined
 		: portableSnapshotSelection(snapshot.selection).include;
 }
 
 export function selectionForSnapshot(include: unknown): SnapshotSelection {
-	return { version: SNAPSHOT_SELECTION_VERSION, include: normalizeSyncInclude(include) };
+	return {
+		version: SNAPSHOT_SELECTION_VERSION,
+		include: normalizeSyncInclude(include),
+	};
 }
 
 export function sameSyncInclude(left: unknown, right: unknown) {
@@ -198,7 +267,10 @@ export function inspectRemoteSelection(
 ): RemoteSelectionState {
 	const remoteInclude = snapshotSelectionInclude(snapshot);
 	if (!remoteInclude) {
-		return { kind: "legacy", discovered: discoverLegacySnapshotInclude(snapshot) };
+		return {
+			kind: "legacy",
+			discovered: discoverLegacySnapshotInclude(snapshot),
+		};
 	}
 	const comparison = compareSyncInclude(localInclude, remoteInclude);
 	return comparison.same
@@ -223,7 +295,10 @@ export class RemoteSelectionMismatchError extends Error {
 		setupName: string,
 		localInclude: unknown,
 		remoteInclude: unknown,
-		configIdentity = JSON.stringify([setupName, normalizeSyncInclude(localInclude)]),
+		configIdentity = JSON.stringify([
+			setupName,
+			normalizeSyncInclude(localInclude),
+		]),
 	) {
 		const local = normalizeSyncInclude(localInclude);
 		const remote = normalizeSyncInclude(remoteInclude);
@@ -272,7 +347,9 @@ export function formatRemoteSelectionMismatch(
 			`This device order: ${localInclude.join(", ") || "none"}`,
 		);
 	}
-	lines.push("Run /sync in TUI to review both content lists and choose what happens next.");
+	lines.push(
+		"Run /sync in TUI to review both content lists and choose what happens next.",
+	);
 	return lines.join("\n");
 }
 
@@ -281,7 +358,9 @@ function stripTerminalControls(value: string) {
 	return value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, "?");
 }
 
-export function discoverLegacySnapshotInclude(snapshot: Pick<Snapshot, "files">) {
+export function discoverLegacySnapshotInclude(
+	snapshot: Pick<Snapshot, "files">,
+) {
 	const builtIns = new Set<BuiltInSyncFile>();
 	const custom = new Set<string>();
 	let sessions = false;
@@ -371,10 +450,16 @@ export function isConfiguredSnapshotPath(
 	const lower = normalized.toLowerCase();
 	if (!normalized.includes("/")) {
 		const builtIn = BUILT_IN_BY_LOWER.get(lower);
-		if (builtIn) return selection.builtIns.includes(builtIn) && !TOP_LEVEL_DIRS.has(builtIn);
+		if (builtIn)
+			return (
+				selection.builtIns.includes(builtIn) && !TOP_LEVEL_DIRS.has(builtIn)
+			);
 	}
 	const topLevel = normalized.slice(0, normalized.indexOf("/"));
-	if (selection.builtIns.includes(topLevel as BuiltInSyncFile) && TOP_LEVEL_DIRS.has(topLevel)) {
+	if (
+		selection.builtIns.includes(topLevel as BuiltInSyncFile) &&
+		TOP_LEVEL_DIRS.has(topLevel)
+	) {
 		return true;
 	}
 	return selection.custom.some((candidate) => {
@@ -389,7 +474,9 @@ export function canonicalSnapshotPathForConfig(
 ) {
 	const normalized = toPosix(relativePath);
 	const lower = normalized.toLowerCase();
-	return TOP_LEVEL_FILE_PATHS.get(lower) ?? includePaths.get(lower) ?? normalized;
+	return (
+		TOP_LEVEL_FILE_PATHS.get(lower) ?? includePaths.get(lower) ?? normalized
+	);
 }
 
 export function isPreservableUnmanagedSnapshotPath(relativePath: string) {
@@ -398,7 +485,9 @@ export function isPreservableUnmanagedSnapshotPath(relativePath: string) {
 	if (normalized.startsWith("sessions/")) return normalized.endsWith(".jsonl");
 	if (!normalized.includes("/")) {
 		const lower = normalized.toLowerCase();
-		return TOP_LEVEL_FILE_PATHS.has(lower) || !RESERVED_TOP_LEVEL_NAMES.has(lower);
+		return (
+			TOP_LEVEL_FILE_PATHS.has(lower) || !RESERVED_TOP_LEVEL_NAMES.has(lower)
+		);
 	}
 	return true;
 }
@@ -416,9 +505,19 @@ export function isBuiltInTopLevelFile(fileName: string) {
 	return TOP_LEVEL_FILE_PATHS.has(path.posix.basename(fileName).toLowerCase());
 }
 
+export function canonicalBuiltInSyncRoot(
+	value: string,
+): BuiltInSyncFile | undefined {
+	return BUILT_IN_BY_LOWER.get(value.toLowerCase());
+}
+
+export function isBuiltInSyncRoot(value: string): boolean {
+	return BUILT_IN_BY_LOWER.has(value.toLowerCase());
+}
+
 /** Compatibility projection for backend-neutral output while callers move to sync.include. */
 export function normalizeSyncFiles(value: unknown): BuiltInSyncFile[] {
-	if (value === undefined) return [...DEFAULT_SYNC_INCLUDE];
+	if (value === undefined) return [...LEGACY_DEFAULT_SYNC_INCLUDE];
 	if (Array.isArray(value)) {
 		return normalizeSyncInclude(value).filter((item): item is BuiltInSyncFile =>
 			BUILT_IN_BY_LOWER.has(item.toLowerCase()),
@@ -431,10 +530,87 @@ export function normalizeSyncFiles(value: unknown): BuiltInSyncFile[] {
 export function normalizeExtraFiles(value: unknown) {
 	if (!Array.isArray(value)) return [];
 	return value.filter(
-		(item): item is string => typeof item === "string" && isSafeCustomIncludePath(item),
+		(item): item is string =>
+			typeof item === "string" && isSafeCustomIncludePath(item),
 	);
 }
 
 export const extraFilePathsByLower = customIncludePathsByLower;
 export const isSafeExtraFileName = isSafeCustomIncludePath;
-export const selectedSyncFileSet = (value: unknown) => new Set(normalizeSyncFiles(value));
+export const selectedSyncFileSet = (value: unknown) =>
+	new Set(normalizeSyncFiles(value));
+
+export interface IncludedContentSummary {
+	readonly categoryCount: number;
+	readonly pathCount: number;
+	readonly extraCount: number;
+	readonly hasSessions: boolean;
+}
+
+const PRIMARY_PATHS_SET = new Set<string>(
+	PRIMARY_CATEGORIES.flatMap((category) => category.paths),
+);
+
+export function summarizeIncludedContent(
+	value: unknown,
+): IncludedContentSummary {
+	const include = normalizeSyncInclude(value);
+	const includeSet = new Set(include);
+	const categoryCount = PRIMARY_CATEGORIES.filter((category) =>
+		category.paths.some((path) => includeSet.has(path)),
+	).length;
+	const hasSessions = includeSet.has("sessions");
+	const pathCount = include.filter((path) => path !== "sessions").length;
+	const extraCount = include.filter(
+		(path) => path !== "sessions" && !PRIMARY_PATHS_SET.has(path),
+	).length;
+	return { categoryCount, pathCount, extraCount, hasSessions };
+}
+
+export function formatIncludedContentSummary(value: unknown): string {
+	const summary = summarizeIncludedContent(value);
+	const parts: string[] = [
+		`${summary.categoryCount} categor${summary.categoryCount === 1 ? "y" : "ies"} (${summary.pathCount} path${summary.pathCount === 1 ? "" : "s"})`,
+	];
+	if (summary.extraCount > 0) {
+		parts.push(
+			`${summary.extraCount} extra path${summary.extraCount === 1 ? "" : "s"}`,
+		);
+	}
+	parts.push(`Sessions: ${summary.hasSessions ? "On" : "Off"}`);
+	return parts.join(" · ");
+}
+
+export function requireCompatibleRemoteSelection(
+	config: AnySyncConfig,
+	snapshot: Snapshot,
+) {
+	const state = inspectRemoteSelection(config.include, snapshot);
+	if (state.kind === "different") {
+		throw remoteSelectionMismatch(
+			config,
+			state.include,
+			syncConfigReviewFingerprint(config),
+		);
+	}
+}
+
+export function formatRemoteSelectionStatus(
+	state: RemoteSelectionState | undefined,
+) {
+	if (!state) return "remote included content: unavailable (remote is empty)";
+	if (state.kind === "same")
+		return "remote included content: matches this setup";
+	if (state.kind === "legacy") {
+		return `remote included content: unavailable in legacy snapshot (${state.discovered.length} path${state.discovered.length === 1 ? "" : "s"} discovered, partial)`;
+	}
+	return [
+		"remote included content: differs from this setup",
+		`remote-only selection: ${safeList(state.remoteOnly)}`,
+		`local-only selection: ${safeList(state.localOnly)}`,
+	].join("\n");
+}
+
+function safeList(values: readonly string[]) {
+	return values.length > 0 ? values.map(safeTerminalText).join(", ") : "none";
+}

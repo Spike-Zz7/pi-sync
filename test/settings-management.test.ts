@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { createTuiHarness } from "@narumitw/pi-tui-kit/testing";
+import esbuild from "esbuild";
 import { test } from "vitest";
 import {
 	createCustomSelectorHarness,
@@ -13,243 +21,36 @@ import {
 	createMockPi,
 } from "../../../test/support.js";
 import {
+	addStorageConnection,
+	addSyncSetup,
 	configuredSyncSetupNames,
 	loadConfig,
 	localConfigPath,
 	readLocalConfigObject,
-	updateLocalConfig,
-} from "../src/config.js";
-import { withConfigFilePublicationForTest, withLocalConfigFileLock } from "../src/config-file.js";
-import { showSetupWizard } from "../src/manager-ui.js";
-import {
-	addStorageConnection,
-	addSyncSetup,
 	removeStorageConnection,
 	removeSyncSetup,
+	updateLocalConfig,
 	updateStorageConnection,
 	updateSyncSetup,
-} from "../src/settings-management.js";
+} from "../src/config.js";
+import {
+	withConfigFilePublicationForTest,
+	withLocalConfigFileLock,
+} from "../src/config-file.js";
+import { showSetupWizard } from "../src/manager-ui.js";
 import { showSyncSettings } from "../src/settings-ui.js";
 import { SetupPullRequiresUiError, useSyncSetup } from "../src/setup-switch.js";
-import { showStorageConnections } from "../src/storage-connections-ui.js";
 import sync from "../src/sync.js";
-import { v3S3Settings, withTempHome } from "./helpers.js";
+import { v3GitSettings, withTempHome } from "./helpers.js";
 
 initTheme("dark", false);
 const execFileAsync = promisify(execFile);
 
-function writeSettings(value = v3S3Settings()) {
-	writeFileSync(localConfigPath(), `${JSON.stringify(value, null, "\t")}\n`, { mode: 0o600 });
+function writeSettings(value = v3GitSettings()) {
+	writeFileSync(localConfigPath(), `${JSON.stringify(value, null, "\t")}\n`, {
+		mode: 0o600,
+	});
 }
-
-test.each([
-	["home", "home"],
-	["work", "work"],
-	[" personal ", "personal"],
-	["", "default"],
-	["   ", "default"],
-])("first Cloudflare R2 setup uses entered name %j and masked credentials", async (input, name) => {
-	await withTempHome(async (agentDir) => {
-		mkdirSync(agentDir, { recursive: true });
-		const mock = createMockPi();
-		sync(mock.pi);
-		const choices = [
-			"Set up sync",
-			"Cloudflare R2",
-			"Use suggested location (recommended)",
-			"Store credentials privately",
-			"Recommended Pi settings",
-			"Enable automatic sync",
-			"Keep sessions off (recommended)",
-			"Save sync setup",
-			undefined,
-		];
-		const inputs = [input, "https://account.r2.cloudflarestorage.com", "access-key"];
-		const rendered: string[] = [];
-		const inputTitles: string[] = [];
-		const { ctx } = createMockContext({
-			hasUI: true,
-			mode: "tui",
-			select: async (title: string) => {
-				rendered.push(title);
-				return choices.shift();
-			},
-			input: async (title: string) => {
-				inputTitles.push(title);
-				return inputs.shift();
-			},
-			custom: secretInput("secret-key", rendered),
-		});
-		await mock.commands.get("sync")?.handler("", ctx);
-		const saved = await readLocalConfigObject();
-		assert.equal(saved?.skipSecretScan, false);
-		assert.deepEqual(saved?.storageConnections[name], {
-			type: "s3",
-			endpoint: "https://account.r2.cloudflarestorage.com",
-			region: "auto",
-			credentials: { accessKeyId: "access-key", secretAccessKey: "secret-key" },
-		});
-		assert.equal(saved?.activeSyncSetup, name);
-		assert.deepEqual(saved?.syncSetups[name].storage, {
-			connection: name,
-			bucket: "pi-sync",
-			path: "./",
-		});
-		assert.equal(
-			inputTitles[0],
-			"Sync setup name\nFor example: home or work. Leave blank for default.",
-		);
-		assert.deepEqual(
-			inputTitles.slice(1).map((title) => title.split("\n")[0]),
-			["Cloudflare R2 endpoint", "Access key ID"],
-		);
-		assert.match(inputTitles[1], /Example: https:\/\/<account-id>\.r2\.cloudflarestorage\.com/u);
-		assert.ok(rendered.join("\n").includes("Storage location: ./"));
-		assert.doesNotMatch(rendered.join("\n"), /What will this sync setup be used for/u);
-		assert.doesNotMatch(rendered.join("\n"), /profiles\/|secret-key|access-key/u);
-	});
-});
-
-test.each(
-	["Cloudflare R2", "Other S3-compatible storage"].flatMap((preset) =>
-		["work/", "work///", "team/work/", "work /", "/", " work/ "].map((input) => ({
-			preset,
-			input,
-		})),
-	),
-)("$preset setup named $input uses the exact reviewed root path", async ({ preset, input }) => {
-	await withTempHome(async () => {
-		const r2 = preset === "Cloudflare R2";
-		const choices = [
-			preset,
-			r2
-				? "Use suggested location (recommended)"
-				: "Use existing bucket with suggested path (recommended)",
-			"Store credentials privately",
-			"Minimal settings",
-			"Keep automatic sync off",
-			"Keep sessions off (recommended)",
-			"Save sync setup",
-		];
-		const inputs = [
-			r2 ? "https://account.r2.cloudflarestorage.com" : "https://s3.example.com",
-			...(r2 ? [] : ["us-east-1", "existing-bucket"]),
-			"access-key",
-		];
-		const titles: string[] = [];
-		let nameCalls = 0;
-		let review = "";
-		const { ctx, notifications } = createMockContext({
-			hasUI: true,
-			mode: "tui",
-			select: async (title: string) => {
-				if (title.startsWith("Review sync setup")) review = title;
-				return choices.shift();
-			},
-			input: async (title: string) => {
-				titles.push(title);
-				if (title.startsWith("Sync setup name")) {
-					nameCalls++;
-					return input;
-				}
-				return inputs.shift();
-			},
-			custom: secretInput("secret-key"),
-		});
-		assert.equal(await showSetupWizard(ctx), true);
-		const reviewedPath = review.split("\n").find((line) => line.startsWith("Storage location: "));
-		assert.equal(reviewedPath, "Storage location: ./");
-		assert.match(titles[0], /^Sync setup name/u);
-		assert.equal(nameCalls, 1);
-		assert.equal(notifications.filter((item) => item.level === "warning").length, 0);
-		const saved = await readLocalConfigObject();
-		const name = input.trim();
-		assert.equal(saved?.activeSyncSetup, name);
-		assert.equal(saved?.syncSetups[name].storage.path, "./");
-		const config = await loadConfig();
-		assert.equal(config.storagePath, "./");
-		assert.equal(config.backend.type, "s3");
-		if (config.backend.type !== "s3") return;
-		assert.equal(config.backend.destination.prefix, "./");
-	});
-});
-
-test("generic S3 setup reviews one complete custom storage path", async () => {
-	await withTempHome(async (agentDir) => {
-		mkdirSync(agentDir, { recursive: true });
-		const mock = createMockPi();
-		sync(mock.pi);
-		const choices = [
-			"Set up sync",
-			"Other S3-compatible storage",
-			"Customize remote location",
-			"Store credentials privately",
-			"Minimal settings",
-			"Keep automatic sync off",
-			"Keep sessions off (recommended)",
-			"Save sync setup",
-			undefined,
-		];
-		const inputs = [
-			"work",
-			"https://s3.example.com",
-			"ap-northeast-1",
-			"company-pi",
-			"teams/pi/work",
-			"access-key",
-		];
-		const inputTitles: string[] = [];
-		const { ctx } = createMockContext({
-			hasUI: true,
-			mode: "tui",
-			select: async () => choices.shift(),
-			input: async (title: string) => {
-				inputTitles.push(title);
-				return inputs.shift();
-			},
-			custom: secretInput("secret-key"),
-		});
-		await mock.commands.get("sync")?.handler("", ctx);
-		const saved = await readLocalConfigObject();
-		assert.deepEqual(saved?.syncSetups.work.storage, {
-			connection: "work",
-			bucket: "company-pi",
-			path: "teams/pi/work",
-		});
-		assert.ok(inputTitles.some((title) => title.startsWith("Storage path\n")));
-		assert.equal(inputTitles.filter((title) => /name/iu.test(title.split("\n")[0])).length, 1);
-		assert.ok(!inputTitles.includes("Remote prefix"));
-		assert.ok(!inputTitles.includes("Remote namespace"));
-	});
-});
-
-test("session inclusion requires privacy acknowledgement before settings publication", async () => {
-	await withTempHome(async (agentDir) => {
-		mkdirSync(agentDir, { recursive: true });
-		const mock = createMockPi();
-		sync(mock.pi);
-		const choices = [
-			"Set up sync",
-			"Cloudflare R2",
-			"Use suggested location (recommended)",
-			"Store credentials privately",
-			"Recommended Pi settings",
-			"Keep automatic sync off",
-			"Include session conversations",
-		];
-		const inputs = ["home", "https://account.r2.cloudflarestorage.com", "access-key"];
-		const { ctx } = createMockContext({
-			hasUI: true,
-			mode: "tui",
-			select: async () => choices.shift(),
-			input: async () => inputs.shift(),
-			confirm: async () => false,
-			custom: secretInput("secret-key"),
-		});
-		await mock.commands.get("sync")?.handler("", ctx);
-		assert.equal(await readLocalConfigObject(), undefined);
-	});
-});
 
 test("cancelling first setup creates neither settings nor sync state", async () => {
 	await withTempHome(async (agentDir) => {
@@ -269,34 +70,25 @@ test("cancelling first setup creates neither settings nor sync state", async () 
 	});
 });
 
-test.each(["Cloudflare R2", "Other S3-compatible storage", "WebDAV", "Git"])(
-	"%s setup asks directly for a name and cancellation creates no settings or state",
-	async (preset) => {
-		await withTempHome(async (agentDir) => {
-			const selections: string[][] = [];
-			const inputs: string[] = [];
-			const { ctx } = createMockContext({
-				hasUI: true,
-				mode: "tui",
-				select: async (_title: string, options: string[]) => {
-					selections.push(options);
-					return selections.length === 1 ? preset : undefined;
-				},
-				input: async (title: string) => {
-					inputs.push(title);
-					return undefined;
-				},
-			});
-			assert.equal(await showSetupWizard(ctx), false);
-			assert.equal(selections.length, 1);
-			assert.equal(inputs.length, 1);
-			assert.match(inputs[0], /^Sync setup name\n/u);
-			assert.equal(await readLocalConfigObject(), undefined);
-			assert.equal(existsSync(path.join(agentDir, "pi-sync")), false);
-			assert.equal(existsSync(path.join(agentDir, ".pisync")), false);
+test("Git setup asks directly for a name and cancellation creates no settings or state", async () => {
+	await withTempHome(async (agentDir) => {
+		const inputs: string[] = [];
+		const { ctx } = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			input: async (title: string) => {
+				inputs.push(title);
+				return undefined;
+			},
 		});
-	},
-);
+		assert.equal(await showSetupWizard(ctx), false);
+		assert.equal(inputs.length, 1);
+		assert.match(inputs[0], /^Sync setup name\n/u);
+		assert.equal(await readLocalConfigObject(), undefined);
+		assert.equal(existsSync(path.join(agentDir, "pi-sync")), false);
+		assert.equal(existsSync(path.join(agentDir, ".pisync")), false);
+	});
+});
 
 test("aborting the name input ignores a late answer without advancing setup", async () => {
 	await withTempHome(async () => {
@@ -306,127 +98,23 @@ test("aborting the name input ignores a late answer without advancing setup", as
 		const { ctx } = createMockContext({
 			hasUI: true,
 			mode: "tui",
-			select: async () => "Cloudflare R2",
-			input: async (_title: string, _placeholder?: string, options?: { signal?: AbortSignal }) => {
+			input: async (
+				_title: string,
+				_placeholder?: string,
+				options?: { signal?: AbortSignal },
+			) => {
 				inputCalls += 1;
 				receivedSignal = options?.signal;
 				controller.abort(new DOMException("Session replaced", "AbortError"));
 				return "home";
 			},
 		});
-		await assert.rejects(showSetupWizard(ctx, controller.signal), { name: "AbortError" });
+		await assert.rejects(showSetupWizard(ctx, controller.signal), {
+			name: "AbortError",
+		});
 		assert.equal(receivedSignal, controller.signal);
 		assert.equal(inputCalls, 1);
 		assert.equal(await readLocalConfigObject(), undefined);
-	});
-});
-
-test("S3 storage connection edit preserves masked credentials and reviews dependents", async () => {
-	await withTempHome(async (agentDir) => {
-		mkdirSync(agentDir, { recursive: true });
-		writeSettings();
-		const choices = [
-			"r2",
-			"Edit storage connection…",
-			"Keep current credentials",
-			"Save storage connection",
-			"Back",
-			"Back",
-		];
-		const inputs = ["https://new.example.com", "us-east-1"];
-		const rendered: string[] = [];
-		const { ctx } = createMockContext({
-			hasUI: true,
-			mode: "tui",
-			select: async (title: string) => {
-				rendered.push(title);
-				return choices.shift();
-			},
-			input: async () => inputs.shift(),
-		});
-		await showStorageConnections(ctx);
-		const config = await loadConfig();
-		assert.equal(config.backend.type, "s3");
-		if (config.backend.type !== "s3") return;
-		assert.equal(config.backend.profile.endpoint, "https://new.example.com");
-		assert.equal(config.backend.profile.accessKeyId, "access-key");
-		assert.match(rendered.join("\n"), /Affected sync setups: home/u);
-		assert.doesNotMatch(rendered.join("\n"), /access-key|secret-key/u);
-	});
-});
-
-test("replacing stored S3 credentials drops the prior session token", async () => {
-	await withTempHome(async (agentDir) => {
-		mkdirSync(agentDir, { recursive: true });
-		const settings = v3S3Settings();
-		(settings.storageConnections.r2.credentials as Record<string, string>).sessionToken =
-			"stale-session-token";
-		writeSettings(settings);
-		const choices = [
-			"r2",
-			"Edit storage connection…",
-			"Change credential source",
-			"Store credentials privately",
-			"Save storage connection",
-			"Back",
-			"Back",
-		];
-		const inputs = [
-			settings.storageConnections.r2.endpoint,
-			settings.storageConnections.r2.region,
-			"replacement-access-key",
-		];
-		const { ctx } = createMockContext({
-			hasUI: true,
-			mode: "tui",
-			select: async () => choices.shift(),
-			input: async () => inputs.shift(),
-			custom: secretInput("replacement-secret-key"),
-		});
-		await showStorageConnections(ctx);
-		assert.deepEqual((await readLocalConfigObject())?.storageConnections.r2.credentials, {
-			accessKeyId: "replacement-access-key",
-			secretAccessKey: "replacement-secret-key",
-		});
-	});
-});
-
-test("S3 manager reuses a connection and defaults a new setup to the bucket root", async () => {
-	await withTempHome(async (agentDir) => {
-		mkdirSync(agentDir, { recursive: true });
-		writeSettings();
-		const mock = createMockPi();
-		sync(mock.pi);
-		const choices = [
-			"More…",
-			"Sync setups…",
-			"Add sync setup",
-			"r2",
-			"Same bucket as “home”",
-			"Recommended Pi settings",
-			"Add sync setup",
-			undefined,
-			undefined,
-		];
-		const inputs = ["work"];
-		const rendered: string[] = [];
-		const { ctx } = createMockContext({
-			hasUI: true,
-			mode: "tui",
-			select: async (title: string) => {
-				rendered.push(title);
-				return choices.shift();
-			},
-			input: async () => inputs.shift(),
-		});
-		await mock.commands.get("sync")?.handler("", ctx);
-		const config = await loadConfig("work");
-		assert.equal(config.connectionName, "r2");
-		assert.equal(config.storagePath, "./");
-		assert.equal((await loadConfig("home")).storagePath, "pi-sync/home");
-		assert.match(rendered.join("\n"), /Remote path: \.\//u);
-		assert.match(rendered.join("\n"), /different path or bucket for independent setups/u);
-		assert.doesNotMatch(rendered.join("\n"), /profiles\//u);
 	});
 });
 
@@ -435,11 +123,15 @@ test("storage connections are reusable by multiple independently named sync setu
 		mkdirSync(agentDir, { recursive: true });
 		writeSettings();
 		await addSyncSetup("work", {
-			storage: { connection: "r2", bucket: "pi-sync-test", path: "pi-sync/work" },
+			storage: {
+				connection: "origin",
+				branch: "work",
+				path: "pi-sync/work",
+			},
 			sync: { include: ["settings.json"], automatic: false },
 		});
 		assert.deepEqual(await configuredSyncSetupNames(), ["home", "work"]);
-		assert.equal((await loadConfig("work")).connectionName, "r2");
+		assert.equal((await loadConfig("work")).connectionName, "origin");
 		assert.equal((await loadConfig("work")).storagePath, "pi-sync/work");
 	});
 });
@@ -450,7 +142,11 @@ test("duplicate normalized remote locations fail before publication", async () =
 		writeSettings();
 		await assert.rejects(
 			addSyncSetup("duplicate", {
-				storage: { connection: "r2", bucket: "pi-sync-test", path: "/pi-sync/home/" },
+				storage: {
+					connection: "origin",
+					branch: "main",
+					path: "/pi-sync/home/",
+				},
 				sync: { include: [], automatic: false },
 			}),
 			/duplicates the storage location/u,
@@ -463,10 +159,17 @@ test("referenced connections and a current setup with alternatives cannot be rem
 		mkdirSync(agentDir, { recursive: true });
 		writeSettings();
 		await addSyncSetup("work", {
-			storage: { connection: "r2", bucket: "pi-sync-test", path: "pi-sync/work" },
+			storage: {
+				connection: "origin",
+				branch: "work",
+				path: "pi-sync/work",
+			},
 			sync: { include: ["settings.json"], automatic: false },
 		});
-		await assert.rejects(removeStorageConnection("r2"), /used by sync setup “home”/u);
+		await assert.rejects(
+			removeStorageConnection("origin"),
+			/used by sync setup “home”/u,
+		);
 		await assert.rejects(removeSyncSetup("home"), /another sync setup/u);
 		assert.equal((await readLocalConfigObject())?.activeSyncSetup, "home");
 	});
@@ -480,16 +183,16 @@ test("removing the sole current setup clears the active reference", async () => 
 		const settings = await readLocalConfigObject();
 		assert.deepEqual(settings?.syncSetups, {});
 		assert.equal(Object.hasOwn(settings ?? {}, "activeSyncSetup"), false);
-		assert.ok(settings?.storageConnections.r2);
+		assert.ok(settings?.storageConnections.origin);
 	});
 });
 
 test("storage connection and sync setup CRUD preserve unknown retained fields", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const initial = v3S3Settings() as unknown as Record<string, unknown>;
+		const initial = v3GitSettings() as unknown as Record<string, unknown>;
 		initial.futureTop = { keep: true };
-		writeSettings(initial as ReturnType<typeof v3S3Settings>);
+		writeSettings(initial as ReturnType<typeof v3GitSettings>);
 		await addStorageConnection("git", {
 			type: "git",
 			remote: "git@github.com:user/pi-sync.git",
@@ -509,7 +212,10 @@ test("storage connection and sync setup CRUD preserve unknown retained fields", 
 			if (connection.type !== "git") throw new Error("expected Git");
 			return { ...connection, remote: "ssh://git@github.com/user/pi-sync.git" };
 		});
-		await updateSyncSetup("backup", (setup) => ({ ...setup, futureSetup: "still" }));
+		await updateSyncSetup("backup", (setup) => ({
+			...setup,
+			futureSetup: "still",
+		}));
 		const saved = JSON.parse(readFileSync(localConfigPath(), "utf8"));
 		assert.deepEqual(saved.futureTop, { keep: true });
 		assert.equal(saved.storageConnections.git.futureConnection, "keep");
@@ -524,12 +230,21 @@ test("switching setup is atomic and follows all three onSwitch policies", async 
 		mkdirSync(agentDir, { recursive: true });
 		writeSettings();
 		await addSyncSetup("work", {
-			storage: { connection: "r2", bucket: "pi-sync-test", path: "pi-sync/work" },
+			storage: {
+				connection: "origin",
+				branch: "work",
+				path: "pi-sync/work",
+			},
 			sync: { include: ["settings.json"], automatic: false },
 		});
-		await updateLocalConfig((settings) => ({ ...settings, onSwitch: "switch-only" }));
+		await updateLocalConfig((settings) => ({
+			...settings,
+			onSwitch: "switch-only",
+		}));
 		const mock = createMockContext({ hasUI: true, mode: "tui" });
-		assert.deepEqual(await useSyncSetup(mock.ctx, "work"), { pullApplied: false });
+		assert.deepEqual(await useSyncSetup(mock.ctx, "work"), {
+			pullApplied: false,
+		});
 		assert.equal((await readLocalConfigObject())?.activeSyncSetup, "work");
 
 		await updateLocalConfig((settings) => ({
@@ -553,9 +268,34 @@ test("switching setup is atomic and follows all three onSwitch policies", async 
 		assert.equal(pullCalls, 0);
 		assert.equal((await readLocalConfigObject())?.activeSyncSetup, "work");
 
-		await updateLocalConfig((settings) => ({ ...settings, onSwitch: "pull-after-switch" }));
+		await updateLocalConfig((settings) => ({
+			...settings,
+			activeSyncSetup: "home",
+		}));
+		const accepted = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			confirm: async () => true,
+		});
+		assert.deepEqual(
+			await useSyncSetup(accepted.ctx, "work", async () => {
+				pullCalls += 1;
+				return "applied";
+			}),
+			{ pullApplied: true },
+		);
+		assert.equal(pullCalls, 1);
+		assert.equal((await readLocalConfigObject())?.activeSyncSetup, "work");
+
+		await updateLocalConfig((settings) => ({
+			...settings,
+			onSwitch: "pull-after-switch",
+		}));
 		const noUi = createMockContext({ hasUI: false, mode: "print" });
-		await assert.rejects(useSyncSetup(noUi.ctx, "home"), SetupPullRequiresUiError);
+		await assert.rejects(
+			useSyncSetup(noUi.ctx, "home"),
+			SetupPullRequiresUiError,
+		);
 		assert.equal((await readLocalConfigObject())?.activeSyncSetup, "work");
 
 		let pulled: string | undefined;
@@ -568,7 +308,9 @@ test("switching setup is atomic and follows all three onSwitch policies", async 
 		);
 		assert.equal(pulled, "home");
 		assert.equal((await readLocalConfigObject())?.activeSyncSetup, "home");
-		assert.deepEqual(await useSyncSetup(mock.ctx, "home"), { pullApplied: false });
+		assert.deepEqual(await useSyncSetup(mock.ctx, "home"), {
+			pullApplied: false,
+		});
 	});
 });
 
@@ -576,12 +318,20 @@ test("cross-process settings mutations serialize under one read-modify-write loc
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
 		writeSettings();
-		const configModule = pathToFileURL(
-			path.join(
-				process.cwd(),
-				"node_modules/.cache/pi-extensions-test/packages/pi-sync/src/config.js",
-			),
-		).href;
+		const cacheDir = path.join(process.cwd(), "node_modules/.cache");
+		mkdirSync(cacheDir, { recursive: true });
+		const tempDir = mkdtempSync(path.join(cacheDir, "test-cfg-"));
+		const configJsPath = path.join(tempDir, "config.mjs");
+		const compiled = esbuild.buildSync({
+			entryPoints: [path.resolve("src/config.ts")],
+			bundle: true,
+			platform: "node",
+			format: "esm",
+			packages: "external",
+			write: false,
+		});
+		writeFileSync(configJsPath, compiled.outputFiles[0].text);
+		const configModule = pathToFileURL(configJsPath).href;
 		const mutate = (field: string) =>
 			execFileAsync(
 				process.execPath,
@@ -592,10 +342,14 @@ test("cross-process settings mutations serialize under one read-modify-write loc
 				],
 				{ env: { ...process.env, PI_CODING_AGENT_DIR: agentDir } },
 			);
-		await Promise.all([mutate("processOne"), mutate("processTwo")]);
-		const saved = JSON.parse(readFileSync(localConfigPath(), "utf8"));
-		assert.equal(saved.processOne, true);
-		assert.equal(saved.processTwo, true);
+		try {
+			await Promise.all([mutate("processOne"), mutate("processTwo")]);
+			const saved = JSON.parse(readFileSync(localConfigPath(), "utf8"));
+			assert.equal(saved.processOne, true);
+			assert.equal(saved.processTwo, true);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -604,13 +358,12 @@ test("concurrent settings mutations serialize without dropping either update", a
 		mkdirSync(agentDir, { recursive: true });
 		writeSettings();
 		await Promise.all([
-			updateLocalConfig((settings) => ({ ...settings, firstUnknown: true })),
-			updateLocalConfig((settings) => ({ ...settings, secondUnknown: true })),
+			updateLocalConfig((settings) => ({ ...settings, alpha: true })),
+			updateLocalConfig((settings) => ({ ...settings, beta: true })),
 		]);
-		const saved = JSON.parse(readFileSync(localConfigPath(), "utf8"));
-		assert.equal(saved.firstUnknown, true);
-		assert.equal(saved.secondUnknown, true);
-		if (process.platform !== "win32") assert.equal(statSync(localConfigPath()).mode & 0o777, 0o600);
+		const settings = JSON.parse(readFileSync(localConfigPath(), "utf8"));
+		assert.equal(settings.alpha, true);
+		assert.equal(settings.beta, true);
 	});
 });
 
@@ -621,31 +374,34 @@ test("an aborted settings mutation waiting on the update queue never publishes",
 		let releaseLock = () => {};
 		let reportLockHeld = () => {};
 		const lockHeld = new Promise<void>((resolve) => {
-			reportLockHeld = () => resolve();
+			reportLockHeld = resolve;
 		});
 		const release = new Promise<void>((resolve) => {
-			releaseLock = () => resolve();
+			releaseLock = resolve;
 		});
 		const blocker = withLocalConfigFileLock(async () => {
 			reportLockHeld();
 			await release;
 		});
 		await lockHeld;
-		const first = updateLocalConfig((settings) => ({ ...settings, firstQueued: true }));
+		const first = updateLocalConfig((settings) => ({
+			...settings,
+			first: true,
+		}));
 		const controller = new AbortController();
-		const second = updateLocalConfig(
-			(settings) => ({ ...settings, abortedQueued: true }),
+		const queued = updateLocalConfig(
+			(settings) => ({ ...settings, second: true }),
 			controller.signal,
 		);
-		const rejected = assert.rejects(second, { name: "AbortError" });
-		controller.abort(new DOMException("Session replaced", "AbortError"));
+		const rejected = assert.rejects(queued, { name: "AbortError" });
+		controller.abort(new DOMException("Aborted while queued", "AbortError"));
 		releaseLock();
 		await blocker;
 		await first;
 		await rejected;
-		const saved = await readLocalConfigObject();
-		assert.equal(saved?.firstQueued, true);
-		assert.equal(saved?.abortedQueued, undefined);
+		const saved = JSON.parse(readFileSync(localConfigPath(), "utf8"));
+		assert.equal(saved.first, true);
+		assert.equal(saved.second, undefined);
 	});
 });
 
@@ -653,13 +409,14 @@ test("an aborted settings mutation waiting on the cross-process lock never publi
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
 		writeSettings();
+		const before = readFileSync(localConfigPath());
 		let releaseLock = () => {};
 		let reportLockHeld = () => {};
 		const lockHeld = new Promise<void>((resolve) => {
-			reportLockHeld = () => resolve();
+			reportLockHeld = resolve;
 		});
 		const release = new Promise<void>((resolve) => {
-			releaseLock = () => resolve();
+			releaseLock = resolve;
 		});
 		const blocker = withLocalConfigFileLock(async () => {
 			reportLockHeld();
@@ -667,23 +424,23 @@ test("an aborted settings mutation waiting on the cross-process lock never publi
 		});
 		await lockHeld;
 		const controller = new AbortController();
-		const update = updateLocalConfig(
-			(settings) => ({ ...settings, abortedWhileLocked: true }),
+		const queued = updateLocalConfig(
+			(settings) => ({ ...settings, aborted: true }),
 			controller.signal,
 		);
-		const rejected = assert.rejects(update, { name: "AbortError" });
-		controller.abort(new DOMException("Session replaced", "AbortError"));
+		const rejected = assert.rejects(queued, { name: "AbortError" });
+		controller.abort(new DOMException("Aborted while waiting", "AbortError"));
 		releaseLock();
 		await blocker;
 		await rejected;
-		assert.equal((await readLocalConfigObject())?.abortedWhileLocked, undefined);
+		assert.deepEqual(readFileSync(localConfigPath()), before);
 	});
 });
 
 test("settings UI exposes local editing and synced-content comparison", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const before = Buffer.from(`${JSON.stringify(v3S3Settings())}\n`);
+		const before = Buffer.from(`${JSON.stringify(v3GitSettings())}\n`);
 		writeFileSync(localConfigPath(), before, { mode: 0o600 });
 		let rendered = "";
 		const { ctx } = createMockContext({
@@ -716,7 +473,11 @@ test("settings UI persists the global secret-scan override", async () => {
 				const harness = createCustomSelectorHarness(factory, 100);
 				harness.handleInput("tui.select.down");
 				harness.handleInput("\r");
-				for (let attempt = 0; attempt < 100 && notifications.length === 0; attempt += 1) {
+				for (
+					let attempt = 0;
+					attempt < 100 && notifications.length === 0;
+					attempt += 1
+				) {
 					await new Promise((resolve) => setTimeout(resolve, 10));
 				}
 				harness.handleInput("\u001b");
@@ -734,7 +495,7 @@ test("settings UI persists the global secret-scan override", async () => {
 test("settings UI disposes on session replacement without mutating settings", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const before = Buffer.from(`${JSON.stringify(v3S3Settings())}\n`);
+		const before = Buffer.from(`${JSON.stringify(v3GitSettings())}\n`);
 		writeFileSync(localConfigPath(), before, { mode: 0o600 });
 		const controller = new AbortController();
 		const { ctx, notifications } = createMockContext({
@@ -768,7 +529,11 @@ test("settings UI restores its displayed value when a private atomic save is rej
 				const harness = createCustomSelectorHarness(factory, 80);
 				harness.handleInput("tui.select.down");
 				harness.handleInput("\r");
-				for (let attempt = 0; attempt < 100 && notifications.length === 0; attempt += 1) {
+				for (
+					let attempt = 0;
+					attempt < 100 && notifications.length === 0;
+					attempt += 1
+				) {
 					await new Promise((resolve) => setTimeout(resolve, 10));
 				}
 				afterFailure = harness.render().join("\n");
@@ -776,17 +541,19 @@ test("settings UI restores its displayed value when a private atomic save is rej
 				return harness.result;
 			},
 		});
+
 		await withConfigFilePublicationForTest(
+			() => Promise.reject(new Error("simulated private atomic save failure")),
 			async () => {
-				const error = new Error("injected settings failure") as NodeJS.ErrnoException;
-				error.code = "EACCES";
-				throw error;
+				await showSyncSettings(ctx, async () => undefined);
 			},
-			() => showSyncSettings(ctx, async () => undefined),
 		);
-		assert.match(afterFailure, /Skip secret scan/u);
-		assert.match(afterFailure, /Off/u);
-		assert.match(notifications.at(-1)?.message ?? "", /settings save failed/iu);
+
+		assert.match(afterFailure, /Skip secret scan\s+Off/u);
+		assert.match(
+			notifications[0]?.message ?? "",
+			/simulated private atomic save failure/u,
+		);
 		assert.equal((await loadConfig()).skipSecretScan, false);
 	});
 });
@@ -794,24 +561,63 @@ test("settings UI restores its displayed value when a private atomic save is rej
 test("invalid files block CRUD and remain byte-for-byte unchanged", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const bytes = Buffer.from('{"version":3,"storageConnections":');
+		const bytes = Buffer.from('{"version":2,"secret":"hidden"}\n');
 		writeFileSync(localConfigPath(), bytes, { mode: 0o600 });
-		await assert.rejects(
-			addStorageConnection("git", { type: "git", remote: "git@github.com:user/repo.git" }),
-			/Invalid JSON/u,
-		);
-		assert.deepEqual(readFileSync(localConfigPath()), bytes);
+		const before = readFileSync(localConfigPath());
+		const beforeStat = statSync(localConfigPath());
+		const actions = [
+			() =>
+				addStorageConnection("extra", {
+					type: "git",
+					remote: "git@github.com:user/pi-sync.git",
+				}),
+			() => removeStorageConnection("extra"),
+			() =>
+				addSyncSetup("extra", {
+					storage: {
+						connection: "extra",
+						branch: "main",
+						path: "pi-sync/extra",
+					},
+					sync: { include: [], automatic: false },
+				}),
+			() => removeSyncSetup("extra"),
+			() => updateStorageConnection("extra", (profile) => profile),
+			() => updateSyncSetup("extra", (setup) => setup),
+		];
+		for (const action of actions) {
+			await assert.rejects(action(), (error: unknown) => {
+				assert.match(String(error), /version 3/iu);
+				assert.doesNotMatch(String(error), /hidden/u);
+				return true;
+			});
+			assert.deepEqual(readFileSync(localConfigPath()), before);
+			assert.equal(statSync(localConfigPath()).mtimeMs, beforeStat.mtimeMs);
+		}
 	});
 });
 
-function secretInput(secret: string, rendered: string[] = []) {
-	return async (factory: unknown) => {
-		const tui = createTuiHarness({ width: 48 });
-		const running = tui.custom(factory as Parameters<typeof tui.custom>[0]);
-		await tui.waitForOpen();
-		tui.type(secret);
-		rendered.push(tui.render().join("\n"));
-		tui.press("tui.input.submit");
-		return running;
-	};
-}
+test("setup-switch queues before a later settings mutation even while reads are locked", async () => {
+	await withTempHome(async (agentDir) => {
+		mkdirSync(agentDir, { recursive: true });
+		writeSettings();
+		await addSyncSetup("work", {
+			storage: { connection: "origin", branch: "work", path: "work" },
+			sync: { include: ["settings.json"], automatic: false },
+		});
+		await updateLocalConfig((settings) => ({
+			...settings,
+			onSwitch: "switch-only",
+		}));
+		const { ctx } = createMockContext({ hasUI: true, mode: "tui" });
+		const mutations = await withLocalConfigFileLock(async () => [
+			useSyncSetup(ctx, "work"),
+			updateLocalConfig((settings) => ({
+				...settings,
+				activeSyncSetup: "home",
+			})),
+		]);
+		await Promise.all(mutations);
+		assert.equal((await readLocalConfigObject())?.activeSyncSetup, "home");
+	});
+});

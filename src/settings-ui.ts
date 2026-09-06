@@ -1,9 +1,13 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { defineMenu, runMenu } from "@narumitw/pi-tui-kit";
 import type { RunRoute } from "./cancellable-operation.js";
-import { loadConfig, localConfigPath, updateLocalConfig } from "./config.js";
+import {
+	loadConfig,
+	localConfigPath,
+	updateLocalConfig,
+	updateSyncSetup,
+} from "./config.js";
 import { dispatchManagerResult } from "./manager-result-dispatcher.js";
-import { updateSyncSetup } from "./settings-management.js";
 import {
 	SETUP_SWITCH_ACTION_OPTIONS,
 	saveOnSwitch,
@@ -20,13 +24,21 @@ export async function showSyncSettings(
 	signal?: AbortSignal,
 ) {
 	if (ctx.mode !== "tui") {
-		ctx.ui.notify(`Edit pi-sync settings manually: ${safeTerminalText(localConfigPath())}`, "info");
+		ctx.ui.notify(
+			`Edit pi-sync settings manually: ${safeTerminalText(localConfigPath())}`,
+			"info",
+		);
 		return;
 	}
 	const initial = await loadConfig();
 	if (signal?.aborted) return;
 	const setupName = initial.setupName;
-	type Action = "automatic" | "skip-secret-scan" | "on-switch" | "include" | "remote-include";
+	type Action =
+		| "automatic"
+		| "skip-secret-scan"
+		| "on-switch"
+		| "include"
+		| "remote-include";
 	const menu = defineMenu<
 		Awaited<ReturnType<typeof loadConfig>>,
 		"settings",
@@ -45,7 +57,8 @@ export async function showSyncSettings(
 					{
 						id: "automatic",
 						label: "Automatic sync",
-						description: "Run conservative synchronization at session startup and shutdown.",
+						description:
+							"Run conservative synchronization at session startup and shutdown.",
 						currentValue: state.automatic ? "On" : "Off",
 						values: ["On", "Off"],
 						action: "automatic",
@@ -53,7 +66,8 @@ export async function showSyncSettings(
 					{
 						id: "skipSecretScan",
 						label: "Skip secret scan",
-						description: "Allow pushes without checking managed local files for possible secrets.",
+						description:
+							"Allow pushes without checking managed local files for possible secrets.",
 						currentValue: state.skipSecretScan ? "On" : "Off",
 						values: ["On", "Off"],
 						action: "skip-secret-scan",
@@ -77,7 +91,8 @@ export async function showSyncSettings(
 					{
 						id: "remoteInclude",
 						label: "Compare synced content",
-						description: "Review this device and remote content lists before choosing either one.",
+						description:
+							"Review this device and remote content lists before choosing either one.",
 						currentValue: "Review",
 						action: "remote-include",
 					},
@@ -87,11 +102,10 @@ export async function showSyncSettings(
 		actions: {
 			automatic: async ({ value, signal: actionSignal }) => {
 				const automatic = value === "On";
-				const mutationSignal = signal ? AbortSignal.any([signal, actionSignal]) : actionSignal;
+				const mutationSignal = signal
+					? AbortSignal.any([signal, actionSignal])
+					: actionSignal;
 				try {
-					const latest = await loadConfig(setupName);
-					if (mutationSignal.aborted) return { kind: "rejected" };
-					if (latest.automatic === automatic) return { kind: "stay" };
 					await updateSyncSetup(
 						setupName,
 						(setup) => ({ ...setup, sync: { ...setup.sync, automatic } }),
@@ -110,12 +124,14 @@ export async function showSyncSettings(
 			},
 			"skip-secret-scan": async ({ value, signal: actionSignal }) => {
 				const skipSecretScan = value === "On";
-				const mutationSignal = signal ? AbortSignal.any([signal, actionSignal]) : actionSignal;
+				const mutationSignal = signal
+					? AbortSignal.any([signal, actionSignal])
+					: actionSignal;
 				try {
-					const latest = await loadConfig(setupName);
-					if (mutationSignal.aborted) return { kind: "rejected" };
-					if (latest.skipSecretScan === skipSecretScan) return { kind: "stay" };
-					await updateLocalConfig((settings) => ({ ...settings, skipSecretScan }), mutationSignal);
+					await updateLocalConfig(
+						(settings) => ({ ...settings, skipSecretScan }),
+						mutationSignal,
+					);
 					if (mutationSignal.aborted) return { kind: "rejected" };
 					ctx.ui.notify(
 						`Secret scan ${skipSecretScan ? "disabled" : "enabled"} for pushes.`,
@@ -130,11 +146,10 @@ export async function showSyncSettings(
 			"on-switch": async ({ value, signal: actionSignal }) => {
 				const action = value ? setupSwitchActionFromLabel(value) : undefined;
 				if (!action) return { kind: "rejected" };
-				const mutationSignal = signal ? AbortSignal.any([signal, actionSignal]) : actionSignal;
+				const mutationSignal = signal
+					? AbortSignal.any([signal, actionSignal])
+					: actionSignal;
 				try {
-					const latest = await loadConfig(setupName);
-					if (mutationSignal.aborted) return { kind: "rejected" };
-					if (latest.onSwitch === action) return { kind: "stay" };
 					await saveOnSwitch(action, mutationSignal);
 					if (mutationSignal.aborted) return { kind: "rejected" };
 					ctx.ui.notify(`After switching setup: ${value}.`, "info");
@@ -145,18 +160,30 @@ export async function showSyncSettings(
 				}
 			},
 			include: async ({ signal: actionSignal }) => {
-				const editorSignal = signal ? AbortSignal.any([signal, actionSignal]) : actionSignal;
+				const editorSignal = signal
+					? AbortSignal.any([signal, actionSignal])
+					: actionSignal;
 				await runRoute("files", editorSignal, undefined, setupName);
 				return editorSignal.aborted ? { kind: "rejected" } : { kind: "stay" };
 			},
 			"remote-include": async ({ signal: actionSignal }) => {
-				const reviewSignal = signal ? AbortSignal.any([signal, actionSignal]) : actionSignal;
-				const { showRemoteSelectionReview } = await import("./remote-selection-ui.js");
+				const reviewSignal = signal
+					? AbortSignal.any([signal, actionSignal])
+					: actionSignal;
+				const { showRemoteSelectionReview } = await import(
+					"./remote-selection-ui.js"
+				);
 				if (reviewSignal.aborted) return { kind: "rejected" };
-				const review = await showRemoteSelectionReview(ctx, setupName, reviewSignal, undefined, {
-					origin: "settings",
-					runRoute,
-				});
+				const review = await showRemoteSelectionReview(
+					ctx,
+					setupName,
+					reviewSignal,
+					undefined,
+					{
+						origin: "settings",
+						runRoute,
+					},
+				);
 				if (reviewSignal.aborted) return { kind: "rejected" };
 				if (review.kind === "route-result") {
 					const disposition = await dispatchManagerResult(
@@ -166,7 +193,9 @@ export async function showSyncSettings(
 						runRoute,
 						reviewSignal,
 					);
-					return disposition.kind === "close" ? { kind: "close" } : { kind: "stay" };
+					return disposition.kind === "close"
+						? { kind: "close" }
+						: { kind: "stay" };
 				}
 				return review.kind === "closed" || review.kind === "stale"
 					? { kind: "close" }

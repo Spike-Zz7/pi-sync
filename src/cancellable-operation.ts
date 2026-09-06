@@ -49,7 +49,9 @@ export async function runCancellableOperation(
 		signal,
 	} = options;
 	if (ctx.mode !== "tui") {
-		return (await runRoute(route, signal, undefined, target)) ?? { kind: "failed" };
+		return (
+			(await runRoute(route, signal, undefined, target)) ?? { kind: "failed" }
+		);
 	}
 	let commitStarted = false;
 	let routeResult: RunRouteResult | undefined;
@@ -59,8 +61,16 @@ export async function runCancellableOperation(
 	>(ctx, {
 		signal,
 		isCurrent: () => !signal?.aborted,
-		create: ({ tui, theme, keybindings, signal: interactionSignal, complete }) => {
-			const loader = new BorderedLoader(tui, theme, message, { cancellable: false });
+		create: ({
+			tui,
+			theme,
+			keybindings,
+			signal: interactionSignal,
+			complete,
+		}) => {
+			const loader = new BorderedLoader(tui, theme, message, {
+				cancellable: false,
+			});
 			const cancelHint = `${keybindingText(keybindings, "tui.select.cancel", "esc")} cancel`;
 			const operation = runRoute(
 				route,
@@ -87,7 +97,10 @@ export async function runCancellableOperation(
 				},
 				invalidate: () => loader.invalidate(),
 				handleInput(data: string) {
-					if (!matchesKey(data, Key.ctrl("c")) && !keybindings.matches(data, "tui.select.cancel")) {
+					if (
+						!matchesKey(data, Key.ctrl("c")) &&
+						!keybindings.matches(data, "tui.select.cancel")
+					) {
 						return;
 					}
 					if (commitStarted) {

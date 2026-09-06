@@ -3,34 +3,33 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { test } from "vitest";
 import { createMockContext, createMockPi } from "../../../test/support.js";
 import { loadConfig, localConfigPath } from "../src/config.js";
+import { showSyncManager, showSyncSetups } from "../src/manager-ui.js";
 import { saveOnSwitch, useSyncSetup } from "../src/setup-switch.js";
-import { showSyncSetups } from "../src/sync-setups-ui.js";
-import { v3S3Settings, withTempHome } from "./helpers.js";
+import { v3GitSettings, withTempHome } from "./helpers.js";
 
-for (const url of [
-	"https://cloud.example.com/dav/owner-a/",
-	"https://cloud.example.com/dav/owner-b/",
+for (const remote of [
+	"git@github.com:owner/a.git",
+	"git@github.com:owner/b.git",
 ]) {
-	test(`saved WebDAV setup detail exposes the exact collection ${url} without writes`, async () => {
+	test(`saved Git setup detail exposes the exact remote ${remote} without writes`, async () => {
 		await withTempHome(async (agentDir) => {
 			mkdirSync(agentDir, { recursive: true });
-			const settings = v3S3Settings();
+			const settings = v3GitSettings();
 			Object.assign(settings.storageConnections, {
-				dav: {
-					type: "webdav",
-					url,
-					credentials: { username: "user", password: "private-password" },
+				git: {
+					type: "git",
+					remote,
 				},
 			});
 			Object.assign(settings.syncSetups, {
 				work: {
-					storage: { connection: "dav", path: "pi-sync/work" },
+					storage: { connection: "git", branch: "main", path: "pi-sync/work" },
 					sync: { include: ["settings.json"], automatic: false },
 				},
 			});
 			const before = JSON.stringify(settings);
 			writeFileSync(localConfigPath(), before, { mode: 0o600 });
-			const { showSyncManager } = await import("../src/manager-ui.js");
+
 			const choices = ["More…", "Sync setups…", "work"];
 			const frames: string[] = [];
 			const routes: string[] = [];
@@ -45,9 +44,12 @@ for (const url of [
 			await showSyncManager(ctx, async (route) => {
 				routes.push(route);
 			});
-			assert.ok(frames.some((frame) => frame.includes(`Endpoint: ${url}`)));
-			assert.ok(frames.some((frame) => frame.includes("Storage location: WebDAV · pi-sync/work")));
-			assert.doesNotMatch(frames.join("\n"), /private-password/u);
+			assert.ok(frames.some((frame) => frame.includes(`Endpoint: ${remote}`)));
+			assert.ok(
+				frames.some((frame) =>
+					frame.includes("Storage location: Git · main:pi-sync/work"),
+				),
+			);
 			assert.deepEqual(routes, []);
 			assert.deepEqual(notifications, []);
 			assert.equal(readFileSync(localConfigPath(), "utf8"), before);
@@ -55,22 +57,35 @@ for (const url of [
 	});
 }
 
-for (const originalPolicy of ["switch-only", "ask-before-pull", "pull-after-switch"]) {
+for (const originalPolicy of [
+	"switch-only",
+	"ask-before-pull",
+	"pull-after-switch",
+]) {
 	test(`switch-only selection replaces ${originalPolicy} without pulling`, async () => {
 		await withTempHome(async (agentDir) => {
 			mkdirSync(agentDir, { recursive: true });
-			const settings = v3S3Settings();
+			const settings = v3GitSettings();
 			settings.onSwitch = originalPolicy;
 			Object.assign(settings.syncSetups, {
 				work: {
-					storage: { connection: "r2", bucket: "work-bucket", path: "pi-sync/work" },
+					storage: {
+						connection: "origin",
+						branch: "main",
+						path: "pi-sync/work",
+					},
 					sync: { include: ["settings.json"], automatic: false },
 				},
 			});
-			writeFileSync(localConfigPath(), JSON.stringify(settings), { mode: 0o600 });
+			writeFileSync(localConfigPath(), JSON.stringify(settings), {
+				mode: 0o600,
+			});
 			assert.equal((await loadConfig()).setupName, "home");
 			assert.equal((await loadConfig("work")).setupName, "work");
-			const { ctx, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
+			const { ctx, notifications } = createMockContext({
+				hasUI: true,
+				mode: "rpc",
+			});
 			await saveOnSwitch("switch-only");
 			let pulls = 0;
 			await useSyncSetup(ctx, "work", async () => {
@@ -83,7 +98,11 @@ for (const originalPolicy of ["switch-only", "ask-before-pull", "pull-after-swit
 			const mock = createMockPi();
 			sync(mock.pi);
 			await mock.commands.get("sync")?.handler("config", ctx);
-			assert.ok(notifications.some(({ message }) => message.includes("sync setup: work")));
+			assert.ok(
+				notifications.some(({ message }) =>
+					message.includes("sync setup: work"),
+				),
+			);
 			const selections: string[][] = [];
 			const menuContext = createMockContext({
 				hasUI: true,

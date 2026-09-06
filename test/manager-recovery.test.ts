@@ -3,19 +3,22 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { createRpcHarness, createTuiHarness } from "@narumitw/pi-tui-kit/testing";
+import {
+	createRpcHarness,
+	createTuiHarness,
+} from "@narumitw/pi-tui-kit/testing";
 import { test } from "vitest";
 import { createMockContext } from "../../../test/support.js";
 import { ensureStateDir, localConfigPath, lockPath } from "../src/config.js";
 import { isLockGuardHeld, unlock } from "../src/lock.js";
-import { describeManagerState } from "../src/manager-state.js";
-import { showSyncManager } from "../src/manager-ui.js";
 import {
 	classifyOperationAvailability,
+	describeManagerState,
 	inspectOperationAvailability,
-} from "../src/operation-availability.js";
+} from "../src/manager-state.js";
+import { showSyncManager } from "../src/manager-ui.js";
 import type { CommandOptions } from "../src/types.js";
-import { v3S3Settings, withTempHome } from "./helpers.js";
+import { v3GitSettings, withTempHome } from "./helpers.js";
 
 initTheme("dark", false);
 
@@ -37,7 +40,8 @@ test("operation availability keeps guarded and inspection-error states distinct"
 		startedAt: new Date().toISOString(),
 	};
 	assert.equal(
-		classifyOperationAvailability({ status: "valid", lock: deadLock }, true).kind,
+		classifyOperationAvailability({ status: "valid", lock: deadLock }, true)
+			.kind,
 		"busy",
 	);
 	assert.equal(
@@ -50,17 +54,26 @@ test("operation availability keeps guarded and inspection-error states distinct"
 		},
 		inspectGuard: async () => false,
 	});
-	assert.deepEqual(failed, { kind: "inspection-error", message: "permission denied" });
+	assert.deepEqual(failed, {
+		kind: "inspection-error",
+		message: "permission denied",
+	});
 });
 
 test("operation inspection failures are not mislabeled as settings errors", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
-		const manager = await describeManagerState(undefined, undefined, async () => ({
-			kind: "inspection-error",
-			message: "permission denied",
-		}));
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
+		const manager = await describeManagerState(
+			undefined,
+			undefined,
+			async () => ({
+				kind: "inspection-error",
+				message: "permission denied",
+			}),
+		);
 		assert.match(manager.title, /Lock check failed/iu);
 		assert.doesNotMatch(manager.title, /Settings need attention/iu);
 		assert.equal(manager.actions[0], "Refresh operation status");
@@ -70,7 +83,9 @@ test("operation inspection failures are not mislabeled as settings errors", asyn
 async function renderManagerWithLock(contents: string) {
 	return withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await ensureStateDir();
 		writeFileSync(lockPath(), contents);
 		const titles: string[] = [];
@@ -131,7 +146,9 @@ test("a live operation offers refresh without exposing lock removal", async () =
 test("guard-only operation state asks the user to wait instead of looking free", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await ensureStateDir();
 		mkdirSync(`${lockPath()}.guard`);
 		const titles: string[] = [];
@@ -158,7 +175,7 @@ test("guard-only operation state asks the user to wait instead of looking free",
 test("RPC stale recovery confirms the local-only effect and returns directly to the normal manager", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const settingsBytes = Buffer.from(JSON.stringify(v3S3Settings()));
+		const settingsBytes = Buffer.from(JSON.stringify(v3GitSettings()));
 		writeFileSync(localConfigPath(), settingsBytes, { mode: 0o600 });
 		await ensureStateDir();
 		writeFileSync(
@@ -187,7 +204,10 @@ test("RPC stale recovery confirms the local-only effect and returns directly to 
 		assert.deepEqual(routes, ["unlock"]);
 		assert.equal(await fileExists(lockPath()), false);
 		assert.deepEqual(readFileSync(localConfigPath()), settingsBytes);
-		assert.match(rpc.dialogs[1]?.title ?? "", /only the local operation lock/iu);
+		assert.match(
+			rpc.dialogs[1]?.title ?? "",
+			/only the local operation lock/iu,
+		);
 		assert.ok(rpc.dialogs[2]?.options?.includes("More…"));
 	});
 });
@@ -195,7 +215,9 @@ test("RPC stale recovery confirms the local-only effect and returns directly to 
 test("RPC unreadable recovery uses explicit stale authorization", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await ensureStateDir();
 		writeFileSync(lockPath(), "{broken");
 		const rpc = createRpcHarness([
@@ -220,7 +242,9 @@ test("RPC unreadable recovery uses explicit stale authorization", async () => {
 test("recovery cancellation preserves the lock and returns to the paused manager", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await ensureStateDir();
 		const bytes = Buffer.from("{broken");
 		writeFileSync(lockPath(), bytes);
@@ -239,15 +263,23 @@ test("recovery cancellation preserves the lock and returns to the paused manager
 		rpc.assertConsumed();
 		assert.equal(routeCalled, false);
 		assert.deepEqual(readFileSync(lockPath()), bytes);
-		assert.match(base.notifications.at(-1)?.message ?? "", /cancelled.*not changed/iu);
-		assert.equal(rpc.dialogs[2]?.options?.[0], "Restore sync access… (recommended)");
+		assert.match(
+			base.notifications.at(-1)?.message ?? "",
+			/cancelled.*not changed/iu,
+		);
+		assert.equal(
+			rpc.dialogs[2]?.options?.[0],
+			"Restore sync access… (recommended)",
+		);
 	});
 });
 
 test("refresh returns a finished live operation directly to the normal manager", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await ensureStateDir();
 		writeFileSync(
 			lockPath(),
@@ -280,7 +312,9 @@ test("refresh returns a finished live operation directly to the normal manager",
 test("a lock that becomes live during recovery is not removed and refreshes to the live state", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await ensureStateDir();
 		writeFileSync(lockPath(), "{broken");
 		const rpc = createRpcHarness([
@@ -311,7 +345,9 @@ test("a lock that becomes live during recovery is not removed and refreshes to t
 test("a guard acquired after confirmation blocks the real unlock path", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await ensureStateDir();
 		const bytes = Buffer.from("{broken");
 		writeFileSync(lockPath(), bytes);
@@ -338,14 +374,19 @@ test("a guard acquired after confirmation blocks the real unlock path", async ()
 		});
 		assert.deepEqual(readFileSync(lockPath()), bytes);
 		assert.equal(optionsSeen[2]?.[0], "Refresh operation status");
-		assert.match(mock.notifications.at(-1)?.message ?? "", /currently running/iu);
+		assert.match(
+			mock.notifications.at(-1)?.message ?? "",
+			/currently running/iu,
+		);
 	});
 });
 
 test("recovery from History returns directly to the normal main manager", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await ensureStateDir();
 		writeFileSync(lockPath(), "{broken");
 		const rpc = createRpcHarness([
@@ -369,7 +410,9 @@ test("recovery from History returns directly to the normal main manager", async 
 test("cancelling recovery from History stays in recovery without calling unlock", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await ensureStateDir();
 		const bytes = Buffer.from("{broken");
 		writeFileSync(lockPath(), bytes);
@@ -397,7 +440,9 @@ test("cancelling recovery from History stays in recovery without calling unlock"
 test("an owner abort immediately after confirmation cannot start unlock routing", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await ensureStateDir();
 		const bytes = Buffer.from("{broken");
 		writeFileSync(lockPath(), bytes);
@@ -455,7 +500,9 @@ test("abort after lock removal still releases the guard and suppresses stale suc
 			assert.equal(await fileExists(lockPath()), false);
 			assert.equal(await isLockGuardHeld(), false);
 			assert.equal(
-				mock.notifications.some(({ message }) => /Removed stale/iu.test(message)),
+				mock.notifications.some(({ message }) =>
+					/Removed stale/iu.test(message),
+				),
 				false,
 			);
 		} finally {
@@ -513,12 +560,20 @@ test("operation frames stay bounded and actionable at supported terminal sizes",
 		]) {
 			await withTempHome(async (agentDir) => {
 				mkdirSync(agentDir, { recursive: true });
-				writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+				writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+					mode: 0o600,
+				});
 				await ensureStateDir();
 				scenario.prepare();
 				const tui = createTuiHarness({ width, rows });
-				const { ctx } = createMockContext({ hasUI: true, mode: "tui", custom: tui.custom });
-				const running = showSyncManager(ctx, async () => ({ kind: "completed" }));
+				const { ctx } = createMockContext({
+					hasUI: true,
+					mode: "tui",
+					custom: tui.custom,
+				});
+				const running = showSyncManager(ctx, async () => ({
+					kind: "completed",
+				}));
 				await tui.waitForOpen();
 				const frame = tui.render();
 				assert.ok(frame.every((line) => visibleWidth(line) <= width));
@@ -537,13 +592,19 @@ test("operation frames stay bounded and actionable at supported terminal sizes",
 test("session replacement during recovery confirmation leaves the lock untouched", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await ensureStateDir();
 		const bytes = Buffer.from("{broken");
 		writeFileSync(lockPath(), bytes);
 		const owner = new AbortController();
 		const tui = createTuiHarness({ width: 60, rows: 16 });
-		const { ctx } = createMockContext({ hasUI: true, mode: "tui", custom: tui.custom });
+		const { ctx } = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			custom: tui.custom,
+		});
 		let routeCalled = false;
 		const running = showSyncManager(
 			ctx,
@@ -563,8 +624,14 @@ test("session replacement during recovery confirmation leaves the lock untouched
 	});
 });
 
-function withRpcUi(context: unknown, rpc: ReturnType<typeof createRpcHarness>): never {
-	const base = context as { ui: Record<string, unknown>; [key: string]: unknown };
+function withRpcUi(
+	context: unknown,
+	rpc: ReturnType<typeof createRpcHarness>,
+): never {
+	const base = context as {
+		ui: Record<string, unknown>;
+		[key: string]: unknown;
+	};
 	return { ...base, ui: { ...base.ui, ...rpc.ui } } as never;
 }
 
@@ -578,7 +645,10 @@ async function fileExists(filePath: string) {
 	}
 }
 
-async function waitForOpenCount(tui: ReturnType<typeof createTuiHarness>, count: number) {
+async function waitForOpenCount(
+	tui: ReturnType<typeof createTuiHarness>,
+	count: number,
+) {
 	for (let attempt = 0; attempt < 100; attempt += 1) {
 		if (tui.openCount >= count) return;
 		await new Promise<void>((resolve) => setImmediate(resolve));

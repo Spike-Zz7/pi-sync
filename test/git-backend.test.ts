@@ -13,7 +13,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { describe, test } from "vitest";
-import { GitSyncBackend, gitBackendIdentity, isSupportedGitVersion } from "../src/git-backend.js";
+import {
+	GitSyncBackend,
+	gitBackendIdentity,
+	isSupportedGitVersion,
+} from "../src/git-backend.js";
 import { isGitPayloadSizeAllowed } from "../src/git-storage.js";
 import {
 	expectedRemoteHead,
@@ -38,25 +42,39 @@ test("Git backend publishes lease-protected commits and preserves repeated-conte
 			]),
 			selection: {
 				version: 1 as const,
-				include: ["settings.json", "keybindings.json", "copies", "missing.toml"],
+				include: [
+					"settings.json",
+					"keybindings.json",
+					"copies",
+					"missing.toml",
+				],
 			},
 		};
 		const first = await backend.publishSnapshot(content, { kind: "missing" });
 		assert.match(
 			first.head.revision,
-			new RegExp(`^${gitBackendIdentity(gitConfig(fixture.remote))}:[0-9a-f]{40}$`),
+			new RegExp(
+				`^${gitBackendIdentity(gitConfig(fixture.remote))}:[0-9a-f]{40}$`,
+			),
 		);
-		const second = await backend.publishSnapshot(content, expectedRemoteHead(first.head));
+		const second = await backend.publishSnapshot(
+			content,
+			expectedRemoteHead(first.head),
+		);
 		const changed = {
 			...content,
 			id: "changed",
 			files: content.files.map((file) =>
 				file.path === "settings.json"
-					? (snapshot([{ path: "settings.json", content: Buffer.from("two") }]).files[0] ?? file)
+					? (snapshot([{ path: "settings.json", content: Buffer.from("two") }])
+							.files[0] ?? file)
 					: file,
 			),
 		};
-		const third = await backend.publishSnapshot(changed, expectedRemoteHead(second.head));
+		const third = await backend.publishSnapshot(
+			changed,
+			expectedRemoteHead(second.head),
+		);
 		assert.notEqual(first.head.snapshotRef, second.head.snapshotRef);
 		assert.equal(first.head.snapshotId, second.head.snapshotId);
 		assert.deepEqual(
@@ -92,19 +110,36 @@ test("Git backend publishes lease-protected commits and preserves repeated-conte
 			]),
 			Buffer.from("two"),
 		);
-		assert.deepEqual(await backend.readSnapshot(first.head.snapshotRef), content);
-		assert.deepEqual(await backend.readSnapshot(third.head.snapshotRef), changed);
+		assert.deepEqual(
+			await backend.readSnapshot(first.head.snapshotRef),
+			content,
+		);
+		assert.deepEqual(
+			await backend.readSnapshot(third.head.snapshotRef),
+			changed,
+		);
 		assert.deepEqual(await backend.readSnapshot("changed"), changed);
-		await assert.rejects(backend.readSnapshot("snap"), /ambiguous.*commit reference/i);
+		await assert.rejects(
+			backend.readSnapshot("snap"),
+			/ambiguous.*commit reference/i,
+		);
 		const freshBackend = new GitSyncBackend(gitConfig(fixture.remote), {
 			cacheRoot: path.join(fixture.root, "fresh-cache"),
 			allowLocalRemotes: true,
 		});
-		assert.deepEqual(await freshBackend.readSnapshot(first.head.snapshotRef), content);
+		assert.deepEqual(
+			await freshBackend.readSnapshot(first.head.snapshotRef),
+			content,
+		);
 		assert.equal(
 			execFileSync(
 				"git",
-				["--git-dir", fixture.remote, "rev-parse", "refs/heads/pi-sync/default"],
+				[
+					"--git-dir",
+					fixture.remote,
+					"rev-parse",
+					"refs/heads/pi-sync/default",
+				],
 				{
 					encoding: "utf8",
 				},
@@ -122,16 +157,26 @@ test("Git backend publishes and reads snapshots with a relative cache root", asy
 		path.join(process.cwd(), "node_modules", ".pi-sync-relative-cache-"),
 	);
 	try {
-		const cacheRoot = path.relative(process.cwd(), path.join(cacheDirectory, "relative cache"));
+		const cacheRoot = path.relative(
+			process.cwd(),
+			path.join(cacheDirectory, "relative cache"),
+		);
 		assert.equal(path.isAbsolute(cacheRoot), false);
 		const backend = new GitSyncBackend(gitConfig(fixture.remote), {
 			cacheRoot,
 			allowLocalRemotes: true,
 		});
-		const content = snapshot([{ path: "settings.json", content: Buffer.from("relative") }]);
-		const publication = await backend.publishSnapshot(content, { kind: "missing" });
+		const content = snapshot([
+			{ path: "settings.json", content: Buffer.from("relative") },
+		]);
+		const publication = await backend.publishSnapshot(content, {
+			kind: "missing",
+		});
 		assert.deepEqual(await backend.readHead(), publication.head);
-		assert.deepEqual(await backend.readSnapshot(publication.head.snapshotRef), content);
+		assert.deepEqual(
+			await backend.readSnapshot(publication.head.snapshotRef),
+			content,
+		);
 		const identityDirectory = path.join(
 			cacheRoot,
 			gitBackendIdentity(gitConfig(fixture.remote)).slice("git:".length),
@@ -153,11 +198,21 @@ test("Git backend reads literal publication paths containing pathspec metacharac
 			cacheRoot: path.join(fixture.root, "cache"),
 			allowLocalRemotes: true,
 		});
-		const content = snapshot([{ path: "settings.json", content: Buffer.from("literal") }]);
+		const content = snapshot([
+			{ path: "settings.json", content: Buffer.from("literal") },
+		]);
 		content.profile = "[home]?";
-		const publication = await backend.publishSnapshot(content, { kind: "missing" });
-		assert.equal((await backend.readHead())?.snapshotRef, publication.head.snapshotRef);
-		assert.deepEqual(await backend.readSnapshot(publication.head.snapshotRef), content);
+		const publication = await backend.publishSnapshot(content, {
+			kind: "missing",
+		});
+		assert.equal(
+			(await backend.readHead())?.snapshotRef,
+			publication.head.snapshotRef,
+		);
+		assert.deepEqual(
+			await backend.readSnapshot(publication.head.snapshotRef),
+			content,
+		);
 		assert.equal((await backend.listHistory()).length, 1);
 	} finally {
 		rmSync(fixture.root, { recursive: true, force: true });
@@ -173,9 +228,16 @@ test("Git backend writes quoted publication paths through NUL-delimited index in
 			cacheRoot: path.join(fixture.root, "cache"),
 			allowLocalRemotes: true,
 		});
-		const content = snapshot([{ path: "settings.json", content: Buffer.from("quoted") }]);
-		const publication = await backend.publishSnapshot(content, { kind: "missing" });
-		assert.deepEqual(await backend.readSnapshot(publication.head.snapshotRef), content);
+		const content = snapshot([
+			{ path: "settings.json", content: Buffer.from("quoted") },
+		]);
+		const publication = await backend.publishSnapshot(content, {
+			kind: "missing",
+		});
+		assert.deepEqual(
+			await backend.readSnapshot(publication.head.snapshotRef),
+			content,
+		);
 	} finally {
 		rmSync(fixture.root, { recursive: true, force: true });
 	}
@@ -200,8 +262,14 @@ test("Git backend rejects cached publications removed from owned-branch history"
 			cacheRoot: path.join(fixture.root, "replacement-cache"),
 			allowLocalRemotes: true,
 		});
-		await replacement.publishSnapshot({ ...snapshot([]), id: "replacement" }, { kind: "missing" });
-		await assert.rejects(first.readSnapshot(old.head.snapshotRef), /not found/i);
+		await replacement.publishSnapshot(
+			{ ...snapshot([]), id: "replacement" },
+			{ kind: "missing" },
+		);
+		await assert.rejects(
+			first.readSnapshot(old.head.snapshotRef),
+			/not found/i,
+		);
 	} finally {
 		rmSync(fixture.root, { recursive: true, force: true });
 	}
@@ -214,7 +282,9 @@ test("Git backend returns the ref fetched after an ls-remote race", async () => 
 			cacheRoot: path.join(fixture.root, "writer"),
 			allowLocalRemotes: true,
 		});
-		const first = await writer.publishSnapshot(snapshot([]), { kind: "missing" });
+		const first = await writer.publishSnapshot(snapshot([]), {
+			kind: "missing",
+		});
 		let secondSnapshotRef: string | undefined;
 		let advanced = false;
 		const reader = new GitSyncBackend(gitConfig(fixture.remote), {
@@ -253,7 +323,10 @@ test("Git backend rejects stale independent writers with an exact lease", async 
 		assert.equal(await second.readHead(), undefined);
 		await first.publishSnapshot(snapshot([]), { kind: "missing" });
 		await assert.rejects(
-			second.publishSnapshot({ ...snapshot([]), id: "other" }, { kind: "missing" }),
+			second.publishSnapshot(
+				{ ...snapshot([]), id: "other" },
+				{ kind: "missing" },
+			),
 			SyncBackendConflictError,
 		);
 		assert.equal((await second.readHead())?.snapshotId, "snap");
@@ -301,12 +374,19 @@ test("Git backend serializes shared-cache initialization and ref fetches", async
 			"repository.git",
 		);
 		assert.equal(
-			execFileSync("git", ["--git-dir", gitDir, "for-each-ref", "refs/pisync/fetch"], {
-				encoding: "utf8",
-			}),
+			execFileSync(
+				"git",
+				["--git-dir", gitDir, "for-each-ref", "refs/pisync/fetch"],
+				{
+					encoding: "utf8",
+				},
+			),
 			"",
 		);
-		assert.doesNotMatch(readFileSync(path.join(gitDir, "config"), "utf8"), /remote\.git/);
+		assert.doesNotMatch(
+			readFileSync(path.join(gitDir, "config"), "utf8"),
+			/remote\.git/,
+		);
 	} finally {
 		rmSync(fixture.root, { recursive: true, force: true });
 	}
@@ -322,14 +402,24 @@ test("Git backend bootstraps its owned branch in an existing non-empty repositor
 		execFileSync("git", ["add", "README.md"], { cwd: work });
 		execFileSync(
 			"git",
-			["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "existing"],
+			[
+				"-c",
+				"user.name=test",
+				"-c",
+				"user.email=test@example.com",
+				"commit",
+				"-m",
+				"existing",
+			],
 			{ cwd: work, stdio: "ignore" },
 		);
 		const existingSha = execFileSync("git", ["rev-parse", "HEAD"], {
 			cwd: work,
 			encoding: "utf8",
 		}).trim();
-		execFileSync("git", ["remote", "add", "origin", fixture.remote], { cwd: work });
+		execFileSync("git", ["remote", "add", "origin", fixture.remote], {
+			cwd: work,
+		});
 		execFileSync("git", ["push", "origin", "HEAD:refs/heads/main"], {
 			cwd: work,
 			stdio: "ignore",
@@ -339,16 +429,25 @@ test("Git backend bootstraps its owned branch in an existing non-empty repositor
 			allowLocalRemotes: true,
 		});
 		const empty = snapshot([]);
-		const publication = await backend.publishSnapshot(empty, { kind: "missing" });
-		assert.deepEqual(await backend.readSnapshot(publication.head.snapshotRef), empty);
+		const publication = await backend.publishSnapshot(empty, {
+			kind: "missing",
+		});
+		assert.deepEqual(
+			await backend.readSnapshot(publication.head.snapshotRef),
+			empty,
+		);
 		assert.deepEqual(
 			[...publicationTree(fixture.remote, publication.head.snapshotRef).keys()],
 			["pi-sync/manifest.json"],
 		);
 		assert.equal(
-			execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], {
-				encoding: "utf8",
-			}).trim(),
+			execFileSync(
+				"git",
+				["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"],
+				{
+					encoding: "utf8",
+				},
+			).trim(),
 			existingSha,
 		);
 	} finally {
@@ -366,10 +465,20 @@ test("Git backend rejects unrelated owned refs and does not inspect a working tr
 		execFileSync("git", ["add", "unrelated.txt"], { cwd: work });
 		execFileSync(
 			"git",
-			["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "unrelated"],
+			[
+				"-c",
+				"user.name=test",
+				"-c",
+				"user.email=test@example.com",
+				"commit",
+				"-m",
+				"unrelated",
+			],
 			{ cwd: work, stdio: "ignore" },
 		);
-		execFileSync("git", ["remote", "add", "origin", fixture.remote], { cwd: work });
+		execFileSync("git", ["remote", "add", "origin", fixture.remote], {
+			cwd: work,
+		});
 		execFileSync("git", ["push", "origin", "HEAD:refs/heads/pi-sync/default"], {
 			cwd: work,
 			stdio: "ignore",
@@ -400,27 +509,39 @@ test("Git backend repairs a corrupt private cache but refuses a symlinked cache"
 		});
 		assert.equal(await repaired.readHead(), undefined);
 		assert.equal(
-			execFileSync("git", ["--git-dir", corrupt, "rev-parse", "--is-bare-repository"], {
-				encoding: "utf8",
-			}).trim(),
+			execFileSync(
+				"git",
+				["--git-dir", corrupt, "rev-parse", "--is-bare-repository"],
+				{
+					encoding: "utf8",
+				},
+			).trim(),
 			"true",
 		);
 
 		const sha256Root = path.join(fixture.root, "sha256-cache");
 		const sha256Cache = path.join(sha256Root, identity, "repository.git");
 		mkdirSync(path.dirname(sha256Cache), { recursive: true });
-		execFileSync("git", ["init", "--bare", "--object-format=sha256", sha256Cache], {
-			stdio: "ignore",
-		});
+		execFileSync(
+			"git",
+			["init", "--bare", "--object-format=sha256", sha256Cache],
+			{
+				stdio: "ignore",
+			},
+		);
 		const repairedFormat = new GitSyncBackend(config, {
 			cacheRoot: sha256Root,
 			allowLocalRemotes: true,
 		});
 		assert.equal(await repairedFormat.readHead(), undefined);
 		assert.equal(
-			execFileSync("git", ["--git-dir", sha256Cache, "rev-parse", "--show-object-format"], {
-				encoding: "utf8",
-			}).trim(),
+			execFileSync(
+				"git",
+				["--git-dir", sha256Cache, "rev-parse", "--show-object-format"],
+				{
+					encoding: "utf8",
+				},
+			).trim(),
 			"sha1",
 		);
 
@@ -458,17 +579,28 @@ test("Git backend rejects unsafe metadata, duplicate paths, and non-canonical co
 			allowLocalRemotes: true,
 		});
 		await assert.rejects(
-			backend.publishSnapshot({ ...snapshot([]), machine: `bad\u001b[31m` }, { kind: "missing" }),
+			backend.publishSnapshot(
+				{ ...snapshot([]), machine: `bad\u001b[31m` },
+				{ kind: "missing" },
+			),
 			/invalid Git snapshot/i,
 		);
 		await assert.rejects(
-			backend.publishSnapshot({ ...snapshot([]), createdAt: "\n2026-01-01" }, { kind: "missing" }),
+			backend.publishSnapshot(
+				{ ...snapshot([]), createdAt: "\n2026-01-01" },
+				{ kind: "missing" },
+			),
 			/invalid Git snapshot/i,
 		);
-		const file = snapshot([{ path: "settings.json", content: Buffer.from("one") }]).files[0];
+		const file = snapshot([
+			{ path: "settings.json", content: Buffer.from("one") },
+		]).files[0];
 		assert.ok(file);
 		await assert.rejects(
-			backend.publishSnapshot({ ...snapshot([]), files: [file, file] }, { kind: "missing" }),
+			backend.publishSnapshot(
+				{ ...snapshot([]), files: [file, file] },
+				{ kind: "missing" },
+			),
 			/invalid Git snapshot file/i,
 		);
 		await assert.rejects(
@@ -497,7 +629,10 @@ test("Git backend rejects unsafe metadata, duplicate paths, and non-canonical co
 		);
 		await assert.rejects(
 			backend.publishSnapshot(
-				{ ...snapshot([]), files: [{ ...file, contentBase64: `${file.contentBase64}=` }] },
+				{
+					...snapshot([]),
+					files: [{ ...file, contentBase64: `${file.contentBase64}=` }],
+				},
 				{ kind: "missing" },
 			),
 			/checksum/i,
@@ -516,7 +651,8 @@ test("Git backend removes private payload temporaries after cancellation", async
 		const backend = new GitSyncBackend(config, {
 			cacheRoot,
 			allowLocalRemotes: true,
-			afterPayloadWriteForTest: () => controller.abort(new DOMException("cancelled", "AbortError")),
+			afterPayloadWriteForTest: () =>
+				controller.abort(new DOMException("cancelled", "AbortError")),
 		});
 		await assert.rejects(
 			backend.publishSnapshot(
@@ -526,9 +662,14 @@ test("Git backend removes private payload temporaries after cancellation", async
 			),
 			(error: unknown) => error instanceof Error && error.name === "AbortError",
 		);
-		const identityDirectory = path.join(cacheRoot, gitBackendIdentity(config).slice("git:".length));
+		const identityDirectory = path.join(
+			cacheRoot,
+			gitBackendIdentity(config).slice("git:".length),
+		);
 		assert.equal(
-			readdirSync(identityDirectory).some((entry) => entry.startsWith(".index-")),
+			readdirSync(identityDirectory).some((entry) =>
+				entry.startsWith(".index-"),
+			),
 			false,
 		);
 		assert.equal(await backend.readHead(), undefined);
@@ -547,7 +688,9 @@ test("Git backend reconciles a lost success response and reports unreachable out
 				throw new Error("simulated lost response");
 			},
 		});
-		const result = await backend.publishSnapshot(snapshot([]), { kind: "missing" });
+		const result = await backend.publishSnapshot(snapshot([]), {
+			kind: "missing",
+		});
 		assert.equal(result.head.snapshotId, "snap");
 	} finally {
 		rmSync(committedFixture.root, { recursive: true, force: true });
@@ -560,7 +703,9 @@ test("Git backend reconciles a lost success response and reports unreachable out
 			allowLocalRemotes: true,
 			afterPushForTest: () => {
 				rmSync(unknownFixture.remote, { recursive: true, force: true });
-				throw new Error("simulated transport loss password=top-secret Bearer bearer-secret");
+				throw new Error(
+					"simulated transport loss password=top-secret Bearer bearer-secret",
+				);
 			},
 		});
 		await assert.rejects(
@@ -585,11 +730,16 @@ test("Git backend disables local pre-push hooks in its private cache", async () 
 	const gitDir = path.join(cacheRoot, identity, "repository.git");
 	const marker = path.join(fixture.root, "hook-ran");
 	try {
-		const backend = new GitSyncBackend(config, { cacheRoot, allowLocalRemotes: true });
+		const backend = new GitSyncBackend(config, {
+			cacheRoot,
+			allowLocalRemotes: true,
+		});
 		await backend.readHead();
 		mkdirSync(path.join(gitDir, "hooks"), { recursive: true });
 		const hook = path.join(gitDir, "hooks", "pre-push");
-		writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o700 });
+		writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, {
+			mode: 0o700,
+		});
 		await backend.publishSnapshot(snapshot([]), { kind: "missing" });
 		assert.equal(existsSync(marker), false);
 	} finally {
@@ -614,13 +764,15 @@ describe("Git backend fails closed on malformed native publication trees", () =>
 		{
 			name: "extra payload",
 			expected: /missing or extra/i,
-			mutate: (work) => writeFileSync(path.join(work, "pi-sync/files/extra"), "x"),
+			mutate: (work) =>
+				writeFileSync(path.join(work, "pi-sync/files/extra"), "x"),
 			verify: (backend) => backend.readHead(),
 		},
 		{
 			name: "entry outside the owned publication",
 			expected: /missing or extra/i,
-			mutate: (work) => writeFileSync(path.join(work, "unowned.txt"), "must not be deleted"),
+			mutate: (work) =>
+				writeFileSync(path.join(work, "unowned.txt"), "must not be deleted"),
 			verify: (backend) => backend.readHead(),
 		},
 		{
@@ -635,7 +787,8 @@ describe("Git backend fails closed on malformed native publication trees", () =>
 		{
 			name: "checksum mismatch",
 			expected: /checksum/i,
-			mutate: (_work, _manifestPath, filePath) => writeFileSync(filePath, "other"),
+			mutate: (_work, _manifestPath, filePath) =>
+				writeFileSync(filePath, "other"),
 		},
 		{
 			name: "declared size mismatch",
@@ -680,7 +833,9 @@ describe("Git backend fails closed on malformed native publication trees", () =>
 			name: "unknown manifest field",
 			expected: /manifest.*malformed/i,
 			mutate: (_work, manifestPath) => {
-				const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+				const manifest = JSON.parse(
+					readFileSync(manifestPath, "utf8"),
+				) as Record<string, unknown>;
 				manifest.unknown = true;
 				writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
 			},
@@ -689,7 +844,9 @@ describe("Git backend fails closed on malformed native publication trees", () =>
 			name: "control character in timestamp",
 			expected: /manifest.*malformed/i,
 			mutate: (_work, manifestPath) => {
-				const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+				const manifest = JSON.parse(
+					readFileSync(manifestPath, "utf8"),
+				) as Record<string, unknown>;
 				manifest.createdAt = "\n2026-01-01";
 				writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
 			},
@@ -725,14 +882,29 @@ test("Git doctor rejects a corrupt active snapshot blob", async () => {
 			snapshot([{ path: "settings.json", content: Buffer.from("valid") }]),
 			{ kind: "missing" },
 		);
-		execFileSync("git", ["clone", "--branch", "pi-sync/default", fixture.remote, corruptWork], {
-			stdio: "ignore",
-		});
-		writeFileSync(path.join(corruptWork, "pi-sync", "files", "settings.json"), "corrupt");
+		execFileSync(
+			"git",
+			["clone", "--branch", "pi-sync/default", fixture.remote, corruptWork],
+			{
+				stdio: "ignore",
+			},
+		);
+		writeFileSync(
+			path.join(corruptWork, "pi-sync", "files", "settings.json"),
+			"corrupt",
+		);
 		execFileSync("git", ["add", "."], { cwd: corruptWork });
 		execFileSync(
 			"git",
-			["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "corrupt"],
+			[
+				"-c",
+				"user.name=test",
+				"-c",
+				"user.email=test@example.com",
+				"commit",
+				"-m",
+				"corrupt",
+			],
 			{ cwd: corruptWork, stdio: "ignore" },
 		);
 		execFileSync("git", ["push", "origin", "HEAD:refs/heads/pi-sync/default"], {
@@ -744,7 +916,11 @@ test("Git doctor rejects a corrupt active snapshot blob", async () => {
 			.filter((item) => item.level === "error")
 			.map((item) => item.message)
 			.join("\n");
-		assert.match(errors, /checksum|snapshot file/i, JSON.stringify(diagnostics));
+		assert.match(
+			errors,
+			/checksum|snapshot file/i,
+			JSON.stringify(diagnostics),
+		);
 	} finally {
 		rmSync(fixture.root, { recursive: true, force: true });
 	}
@@ -779,9 +955,17 @@ test("Git diagnostics redact remote and private cache paths", async () => {
 	});
 	rmSync(fixture.remote, { recursive: true, force: true });
 	try {
-		const output = (await backend.diagnose()).map((item) => item.message).join("\n");
-		assert.doesNotMatch(output, new RegExp(fixture.remote.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
-		assert.doesNotMatch(output, new RegExp(cacheRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
+		const output = (await backend.diagnose())
+			.map((item) => item.message)
+			.join("\n");
+		assert.doesNotMatch(
+			output,
+			new RegExp(fixture.remote.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")),
+		);
+		assert.doesNotMatch(
+			output,
+			new RegExp(cacheRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")),
+		);
 		assert.match(output, /git remote:/i);
 	} finally {
 		rmSync(fixture.root, { recursive: true, force: true });
@@ -795,9 +979,15 @@ test("Git backend rejects malformed opaque revisions instead of treating them as
 			cacheRoot: path.join(fixture.root, "cache"),
 			allowLocalRemotes: true,
 		});
-		assert.throws(() => backend.sameRevision("bad", "also-bad"), /invalid Git remote revision/i);
+		assert.throws(
+			() => backend.sameRevision("bad", "also-bad"),
+			/invalid Git remote revision/i,
+		);
 		await assert.rejects(
-			backend.publishSnapshot(snapshot([]), { kind: "revision", revision: "bad" }),
+			backend.publishSnapshot(snapshot([]), {
+				kind: "revision",
+				revision: "bad",
+			}),
 			SyncBackendConflictError,
 		);
 		assert.equal(await backend.readHead(), undefined);
@@ -833,9 +1023,13 @@ async function malformedPublicationError(
 			snapshot([{ path: "settings.json", content: Buffer.from("valid") }]),
 			{ kind: "missing" },
 		);
-		execFileSync("git", ["clone", "--branch", "pi-sync/default", fixture.remote, work], {
-			stdio: "ignore",
-		});
+		execFileSync(
+			"git",
+			["clone", "--branch", "pi-sync/default", fixture.remote, work],
+			{
+				stdio: "ignore",
+			},
+		);
 		mutate(
 			work,
 			path.join(work, "pi-sync", "manifest.json"),
@@ -844,7 +1038,15 @@ async function malformedPublicationError(
 		execFileSync("git", ["add", "--all"], { cwd: work });
 		execFileSync(
 			"git",
-			["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "mutate"],
+			[
+				"-c",
+				"user.name=test",
+				"-c",
+				"user.email=test@example.com",
+				"commit",
+				"-m",
+				"mutate",
+			],
 			{ cwd: work, stdio: "ignore" },
 		);
 		execFileSync("git", ["push", "origin", "HEAD:refs/heads/pi-sync/default"], {
@@ -867,9 +1069,13 @@ async function malformedPublicationError(
 }
 
 function publicationTree(gitDir: string, commit: string) {
-	const output = execFileSync("git", ["--git-dir", gitDir, "ls-tree", "-r", commit], {
-		encoding: "utf8",
-	});
+	const output = execFileSync(
+		"git",
+		["--git-dir", gitDir, "ls-tree", "-r", commit],
+		{
+			encoding: "utf8",
+		},
+	);
 	return new Map(
 		output
 			.trim()
@@ -889,4 +1095,62 @@ test("Git backend production validation rejects local and credential-bearing rem
 	assert.throws(() => new GitSyncBackend(local), /SSH or HTTPS/i);
 	const credential = gitConfig("https://user:token@example.com/private.git");
 	assert.throws(() => new GitSyncBackend(credential), /credentials/i);
+});
+
+test("Git ensureCache does not share the first caller's cancellation with a live caller", async () => {
+	const fixture = createBareRemote();
+	try {
+		const backend = new GitSyncBackend(gitConfig(fixture.remote), {
+			cacheRoot: path.join(fixture.root, "cache"),
+			allowLocalRemotes: true,
+		});
+		const controller = new AbortController();
+		const first = backend.readHead(controller.signal);
+		const rejected = assert.rejects(first, { name: "AbortError" });
+		const second = backend.readHead();
+		controller.abort(new DOMException("First caller cancelled", "AbortError"));
+		await rejected;
+		assert.equal(await second, undefined);
+	} finally {
+		rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
+
+test("Git publication errors redact credential URLs and authorization formats", async () => {
+	const fixture = createBareRemote();
+	try {
+		const backend = new GitSyncBackend(gitConfig(fixture.remote), {
+			cacheRoot: path.join(fixture.root, "cache"),
+			allowLocalRemotes: true,
+			afterPushForTest: () => {
+				rmSync(fixture.remote, { recursive: true, force: true });
+				throw new Error(
+					[
+						"http://user:http-secret@example.com/repo",
+						"https://user:https-secret@example.com/repo",
+						"ssh://user:ssh-secret@example.com/repo",
+						"Basic base64-secret",
+						"Bearer bearer-secret",
+						"Authorization: Basic header-secret",
+						"token: token-secret",
+						"password = password-secret",
+					].join("\n"),
+				);
+			},
+		});
+		await assert.rejects(
+			backend.publishSnapshot(snapshot([]), { kind: "missing" }),
+			(error: unknown) => {
+				assert.ok(error instanceof SyncBackendPublicationOutcomeUnknownError);
+				assert.doesNotMatch(
+					error.message,
+					/(?:http|https|ssh|base64|bearer|header|token|password)-secret/u,
+				);
+				assert.match(error.message, /<redacted>/u);
+				return true;
+			},
+		);
+	} finally {
+		rmSync(fixture.root, { recursive: true, force: true });
+	}
 });

@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { portableSnapshotSelection, snapshotSelectionInclude } from "./sync-policy.js";
+import {
+	portableSnapshotSelection,
+	snapshotSelectionInclude,
+} from "./sync-policy.js";
 import type { Snapshot, SnapshotSelection } from "./types.js";
 
 export const GIT_MANIFEST_VERSION = 2;
@@ -40,7 +43,9 @@ export interface GitTreeEntry {
 }
 
 export function isGitPayloadSizeAllowed(size: number) {
-	return Number.isSafeInteger(size) && size >= 0 && size <= MAX_GIT_PAYLOAD_BYTES;
+	return (
+		Number.isSafeInteger(size) && size >= 0 && size <= MAX_GIT_PAYLOAD_BYTES
+	);
 }
 
 export function requireGitManifest(value: unknown): GitManifest {
@@ -82,14 +87,17 @@ export function requireGitManifest(value: unknown): GitManifest {
 			"machine",
 			"profile",
 			"syncSessions",
-			...(manifest.snapshotSyncSessions === undefined ? [] : ["snapshotSyncSessions"]),
+			...(manifest.snapshotSyncSessions === undefined
+				? []
+				: ["snapshotSyncSessions"]),
 			...(manifest.selection === undefined ? [] : ["selection"]),
 			"files",
 		])
 	) {
 		throw new Error("Git publication manifest is malformed.");
 	}
-	if (manifest.selection !== undefined) portableSnapshotSelection(manifest.selection);
+	if (manifest.selection !== undefined)
+		portableSnapshotSelection(manifest.selection);
 	let total = 0;
 	const paths = new Set<string>();
 	for (const rawFile of manifest.files) {
@@ -98,7 +106,11 @@ export function requireGitManifest(value: unknown): GitManifest {
 		}
 		const file = rawFile as Partial<GitManifestFile>;
 		if (
-			!hasExactKeys(file as Record<string, unknown>, ["path", "sha256", "size"]) ||
+			!hasExactKeys(file as Record<string, unknown>, [
+				"path",
+				"sha256",
+				"size",
+			]) ||
 			!isSafeSnapshotPath(file.path) ||
 			typeof file.sha256 !== "string" ||
 			!/^[0-9a-f]{64}$/u.test(file.sha256) ||
@@ -110,7 +122,9 @@ export function requireGitManifest(value: unknown): GitManifest {
 		}
 		total += file.size;
 		if (!Number.isSafeInteger(total) || total > MAX_GIT_SNAPSHOT_BYTES) {
-			throw new Error(`Git snapshot content exceeds the ${MAX_GIT_SNAPSHOT_BYTES}-byte limit.`);
+			throw new Error(
+				`Git snapshot content exceeds the ${MAX_GIT_SNAPSHOT_BYTES}-byte limit.`,
+			);
 		}
 		paths.add(file.path);
 	}
@@ -118,7 +132,11 @@ export function requireGitManifest(value: unknown): GitManifest {
 	return manifest as GitManifest;
 }
 
-export function validateGitSnapshot(snapshot: Snapshot, manifest: GitManifest, namespace: string) {
+export function validateGitSnapshot(
+	snapshot: Snapshot,
+	manifest: GitManifest,
+	namespace: string,
+) {
 	const prepared = prepareGitSnapshot(snapshot, namespace);
 	const syncSessions =
 		snapshot.syncSessions === true ||
@@ -147,7 +165,9 @@ export function validateGitSnapshot(snapshot: Snapshot, manifest: GitManifest, n
 			);
 		})
 	) {
-		throw new Error("Git snapshot identity does not match its publication manifest.");
+		throw new Error(
+			"Git snapshot identity does not match its publication manifest.",
+		);
 	}
 }
 
@@ -186,7 +206,10 @@ export function prepareGitSnapshot(snapshot: Snapshot, namespace: string) {
 			throw new Error("Invalid Git snapshot file.");
 		}
 		const content = Buffer.from(file.contentBase64, "base64");
-		if (content.toString("base64") !== file.contentBase64 || sha256(content) !== file.sha256) {
+		if (
+			content.toString("base64") !== file.contentBase64 ||
+			sha256(content) !== file.sha256
+		) {
 			throw new Error("Git snapshot file checksum mismatch.");
 		}
 		if (!isGitPayloadSizeAllowed(content.byteLength)) {
@@ -196,10 +219,17 @@ export function prepareGitSnapshot(snapshot: Snapshot, namespace: string) {
 		}
 		total += content.byteLength;
 		if (!Number.isSafeInteger(total) || total > MAX_GIT_SNAPSHOT_BYTES) {
-			throw new Error(`Git snapshot content exceeds the ${MAX_GIT_SNAPSHOT_BYTES}-byte limit.`);
+			throw new Error(
+				`Git snapshot content exceeds the ${MAX_GIT_SNAPSHOT_BYTES}-byte limit.`,
+			);
 		}
 		paths.add(file.path);
-		prepared.push({ path: file.path, sha256: file.sha256, size: content.byteLength, content });
+		prepared.push({
+			path: file.path,
+			sha256: file.sha256,
+			size: content.byteLength,
+			content,
+		});
 	}
 	assertNoPathConflicts([...paths]);
 	return prepared;
@@ -207,7 +237,8 @@ export function prepareGitSnapshot(snapshot: Snapshot, namespace: string) {
 
 export function parseGitTree(output: Buffer): GitTreeEntry[] {
 	if (output.byteLength === 0) return [];
-	if (output.at(-1) !== 0) throw new Error("Git publication tree response is malformed.");
+	if (output.at(-1) !== 0)
+		throw new Error("Git publication tree response is malformed.");
 	return output
 		.subarray(0, -1)
 		.toString("utf8")
@@ -237,25 +268,42 @@ export function validateGitPublicationTree(
 ) {
 	const byPath = new Map<string, GitTreeEntry>();
 	for (const entry of entries) {
-		if (byPath.has(entry.path)) throw new Error("Git publication tree contains duplicate paths.");
+		if (byPath.has(entry.path))
+			throw new Error("Git publication tree contains duplicate paths.");
 		byPath.set(entry.path, entry);
 	}
-	const expectedPaths = [manifestPath, ...manifest.files.map((file) => filePath(file.path))];
-	if (entries.length !== expectedPaths.length || expectedPaths.some((path) => !byPath.has(path))) {
+	const expectedPaths = [
+		manifestPath,
+		...manifest.files.map((file) => filePath(file.path)),
+	];
+	if (
+		entries.length !== expectedPaths.length ||
+		expectedPaths.some((path) => !byPath.has(path))
+	) {
 		throw new Error("Git publication tree has missing or extra files.");
 	}
 	for (const expectedPath of expectedPaths) {
 		const entry = byPath.get(expectedPath);
 		if (entry?.mode !== "100644" || entry.type !== "blob") {
-			throw new Error(`Git publication tree contains a non-regular file: ${expectedPath}`);
+			throw new Error(
+				`Git publication tree contains a non-regular file: ${expectedPath}`,
+			);
 		}
 	}
-	return manifest.files.map((file) => byPath.get(filePath(file.path)) as GitTreeEntry);
+	return manifest.files.map(
+		(file) => byPath.get(filePath(file.path)) as GitTreeEntry,
+	);
 }
 
-function sameOptionalInclude(left: string[] | undefined, right: string[] | undefined) {
+function sameOptionalInclude(
+	left: string[] | undefined,
+	right: string[] | undefined,
+) {
 	if (!left || !right) return left === right;
-	return left.length === right.length && left.every((item, index) => item === right[index]);
+	return (
+		left.length === right.length &&
+		left.every((item, index) => item === right[index])
+	);
 }
 
 function isSafeSnapshotPath(value: unknown): value is string {
@@ -270,7 +318,10 @@ function isSafeSnapshotPath(value: unknown): value is string {
 			.split("/")
 			.every(
 				(segment) =>
-					segment && segment !== "." && segment !== ".." && segment.toLowerCase() !== ".git",
+					segment &&
+					segment !== "." &&
+					segment !== ".." &&
+					segment.toLowerCase() !== ".git",
 			)
 	);
 }
@@ -279,7 +330,8 @@ function hasExactKeys(value: Record<string, unknown>, expected: string[]) {
 	const keys = Object.keys(value).sort();
 	const expectedKeys = [...expected].sort();
 	return (
-		keys.length === expectedKeys.length && keys.every((key, index) => key === expectedKeys[index])
+		keys.length === expectedKeys.length &&
+		keys.every((key, index) => key === expectedKeys[index])
 	);
 }
 
@@ -289,7 +341,9 @@ function assertNoPathConflicts(paths: string[]) {
 		const parent = sorted[index - 1];
 		const child = sorted[index];
 		if (parent && child?.startsWith(`${parent}/`)) {
-			throw new Error(`Git snapshot file path conflict: ${parent} and ${child}`);
+			throw new Error(
+				`Git snapshot file path conflict: ${parent} and ${child}`,
+			);
 		}
 	}
 }

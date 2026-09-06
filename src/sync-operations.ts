@@ -1,22 +1,20 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createSyncBackend, type SyncBackendFactory } from "./backend-factory.js";
+import type {
+	ExtensionCommandContext,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {
 	loadConfig,
 	readStateForConfig,
 	sessionDirForApply,
+	sessionDirFromContext,
 	stateDir,
 	syncConfigReviewFingerprint,
 	syncSessionsWarnings,
 	writeStateForConfig,
 } from "./config.js";
-import { inspectLock, isLockGuardHeld, isStaleLock, withLock } from "./lock.js";
-import {
-	formatRemoteSelectionStatus,
-	readSnapshotForHead,
-	requireCompatibleRemoteSelection,
-} from "./remote-snapshot.js";
+import { inspectLock, isLockGuardHeld, withLock } from "./lock.js";
 import {
 	createSnapshot,
 	filterSnapshotForConfigPolicy,
@@ -30,24 +28,32 @@ import {
 import { applySnapshot } from "./snapshot-apply.js";
 import { encodeSnapshot } from "./snapshot-codec.js";
 import {
+	createSyncBackend,
 	expectedRemoteHead,
 	type PublishSnapshotResult,
 	type RemoteHead,
+	readSnapshotForHead,
 	type SyncBackend,
+	type SyncBackendFactory,
 } from "./sync-backend.js";
 import { createSyncDecision } from "./sync-decision.js";
 import {
 	countPreservedRemoteFiles,
 	errorMessage,
-	formatDiff,
+	formatDiffSummary,
+	formatDoctorMessages,
 	formatPullSummary,
 	formatPushSummary,
 	formatRollbackSummary,
-	formatSnapshotOnlyDiff,
-	publicationCapabilityDescription,
+	formatSnapshotHistoryLabel,
+	formatStatusSummary,
 	safeTerminalText,
 } from "./sync-format.js";
-import { inspectRemoteSelection, remoteSelectionMismatch } from "./sync-policy.js";
+import {
+	inspectRemoteSelection,
+	remoteSelectionMismatch,
+	requireCompatibleRemoteSelection,
+} from "./sync-policy.js";
 import {
 	canPullRemoteSessionsOnFirstSync,
 	canPullRemoteSettingsOnFirstSync,
@@ -75,30 +81,29 @@ const DEFAULT_PROFILE = "default";
 const POST_LOCAL_COMMIT_TIMEOUT_MS = 30_000;
 
 export class PublicationStatePersistenceError extends Error {
-	readonly head: RemoteHead;
-	readonly backupPath?: string;
-
-	constructor(head: RemoteHead, cause: unknown, backupPath?: string) {
+	constructor(
+		readonly head: RemoteHead,
+		cause: unknown,
+		readonly backupPath?: string,
+	) {
 		super(
 			`Remote publication ${head.snapshotId} is active, but local sync state could not be saved${backupPath ? `; local backup: ${backupPath}` : ""}: ${errorMessage(cause)}`,
 			{ cause },
 		);
 		this.name = "PublicationStatePersistenceError";
-		this.head = head;
-		this.backupPath = backupPath;
 	}
 }
 
 export class RollbackPublicationError extends Error {
-	readonly backupPath: string;
-
-	constructor(backupPath: string, cause: unknown) {
+	constructor(
+		readonly backupPath: string,
+		cause: unknown,
+	) {
 		super(
 			`Rollback applied locally with backup ${backupPath}, but remote publication failed: ${errorMessage(cause)}`,
 			{ cause },
 		);
 		this.name = "RollbackPublicationError";
-		this.backupPath = backupPath;
 	}
 }
 
@@ -109,8 +114,115 @@ interface PushInput {
 	backend?: SyncBackend;
 }
 
-function backendFor(config: AnySyncConfig, factory: SyncBackendFactory) {
-	return factory(config);
+const sessionAwareTitle = (
+	verb: "Push" | "Pull" | "Rollback",
+	snapshot?: Snapshot,
+) =>
+	snapshot && snapshotIncludesSessions(snapshot)
+		? `${verb} pi settings and sessions?`
+		: `${verb} pi settings?`;
+
+function notifySnapshotResult(
+	ctx: ExtensionCommandContext | ExtensionContext,
+	prefix: string,
+	warnings: readonly string[],
+) {
+	ctx.ui.notify(
+		[prefix, ...warnings].filter(Boolean).join("\n"),
+		warnings.length > 0 ? "warning" : "info",
+	);
+}
+
+function localSnapshotForContext(
+	ctx: ExtensionCommandContext | ExtensionContext,
+	config: AnySyncConfig,
+) {
+	return createSnapshot(
+		config.snapshotIdentity,
+		snapshotOptionsForContext(ctx, config),
+	);
+}
+
+async function backupAndApplyRemote(
+	ctx: ExtensionCommandContext | ExtensionContext,
+	config: AnySyncConfig,
+	remote: Snapshot,
+	options: CommandOptions,
+) {
+	const backup = await backupLocal(
+		config.snapshotIdentity,
+		snapshotOptionsForContext(ctx, config),
+		options.signal,
+	);
+	const applySessionDir = await sessionDirForApply(ctx, remote);
+	throwIfAborted(options.signal);
+	options.onCommit?.();
+	const lastFileHashes = await applySnapshot(
+		remote,
+		protectedSessionPaths(ctx),
+		{
+			include: config.include,
+			sessionDir: applySessionDir,
+		},
+	);
+	return { backup, lastFileHashes };
+}
+
+function divergedDecision(
+	kind:
+		| "both-changed"
+		| "first-sync-settings-diverged"
+		| "first-sync-sessions-diverged",
+	config: AnySyncConfig,
+	state: SyncState,
+	local: Snapshot,
+	remote: Snapshot | undefined,
+	directMessage: string,
+) {
+	return createSyncDecision({
+		kind,
+		config,
+		state,
+		local,
+		remote,
+		localChanged: true,
+		remoteChanged: true,
+		directMessage,
+	});
+}
+
+function recordAppliedState(
+	config: AnySyncConfig,
+	snapshotId: string,
+	lastRemoteRevision: string | undefined,
+	lastFileHashes: Record<string, string>,
+) {
+	return writeStateForConfig(config, {
+		version: VERSION,
+		profile: config.snapshotIdentity,
+		lastAppliedSnapshot: snapshotId,
+		lastRemoteRevision,
+		lastFileHashes,
+		include: [...config.include],
+	});
+}
+
+async function persistPublicationState(
+	config: AnySyncConfig,
+	head: RemoteHead,
+	lastFileHashes: Record<string, string>,
+	backupPath?: string,
+) {
+	try {
+		await recordAppliedState(
+			config,
+			head.snapshotId,
+			head.revision,
+			lastFileHashes,
+		);
+	} catch (error) {
+		throw new PublicationStatePersistenceError(head, error, backupPath);
+	}
 }
 
 export async function status(
@@ -121,48 +233,39 @@ export async function status(
 	const config = await loadConfig(options.setup);
 	throwIfAborted(options.signal);
 	ctx.ui.setStatus(STATUS_KEY, `checking ${config.setupName}`);
-	const backend = await backendFor(config, factory);
-	const local = await createSnapshot(
-		config.snapshotIdentity,
-		snapshotOptionsForContext(ctx, config),
-	);
+	const backend = await factory(config);
+	const local = await localSnapshotForContext(ctx, config);
 	throwIfAborted(options.signal);
 	const state = await readStateForConfig(config);
 	throwIfAborted(options.signal);
 	const head = await backend.readHead(options.signal);
 	throwIfAborted(options.signal);
 	const selectionState = head
-		? inspectRemoteSelection(config.include, { selection: head.selection, files: [] })
+		? inspectRemoteSelection(config.include, {
+				selection: head.selection,
+				files: [],
+			})
 		: undefined;
 	const localChanged = hasLocalChanges(local, state, config);
-
-	const remoteText = head
-		? `remote: ${head.snapshotId} from ${head.machine} at ${head.createdAt}`
-		: "remote: empty";
-	const remoteChanged = remoteChangedSinceState(head, state, config, (left, right) =>
-		backend.sameRevision(left, right),
+	const remoteChanged = remoteChangedSinceState(
+		head,
+		state,
+		config,
+		(left, right) => backend.sameRevision(left, right),
 	);
-	const warnings = syncSessionsWarnings(config);
 	ctx.ui.setStatus(STATUS_KEY, undefined);
-	ctx.ui.notify(
-		[
-			`sync setup: ${config.setupName}`,
-			`storage connection: ${config.connectionName}`,
-			`storage location: ${safeTerminalText(backend.destination)}`,
-			`publication safety: ${publicationCapabilityDescription(backend.capability)}`,
-			`included content: ${config.include.join(", ") || "none"}`,
-			`sessions: ${config.include.includes("sessions") ? "included" : "excluded"}`,
-			remoteText,
-			formatRemoteSelectionStatus(selectionState),
-			`local files: ${local.files.length}`,
-			`local changed since last sync: ${localChanged ? "yes" : "no"}`,
-			`remote changed since last sync: ${remoteChanged ? "yes" : "no"}`,
-			...warnings,
-		].join("\n"),
-		localChanged || remoteChanged || selectionState?.kind === "different" || warnings.length > 0
-			? "warning"
-			: "info",
+	const { text, level } = formatStatusSummary(
+		config,
+		backend,
+		local,
+		state,
+		head,
+		selectionState,
+		localChanged,
+		remoteChanged,
+		syncSessionsWarnings(config),
 	);
+	ctx.ui.notify(text, level);
 }
 
 export async function diff(
@@ -173,11 +276,8 @@ export async function diff(
 	const config = await loadConfig(options.setup);
 	throwIfAborted(options.signal);
 	ctx.ui.setStatus(STATUS_KEY, `checking ${config.setupName}`);
-	const backend = await backendFor(config, factory);
-	const local = await createSnapshot(
-		config.snapshotIdentity,
-		snapshotOptionsForContext(ctx, config),
-	);
+	const backend = await factory(config);
+	const local = await localSnapshotForContext(ctx, config);
 	throwIfAborted(options.signal);
 	const { snapshot: remote, selectionState } = await readRemoteSnapshot(
 		backend,
@@ -187,27 +287,15 @@ export async function diff(
 	);
 	throwIfAborted(options.signal);
 	ctx.ui.setStatus(STATUS_KEY, undefined);
-
-	const warnings = syncSessionsWarnings(config);
-	const header = [
-		`sync setup: ${config.setupName}`,
-		`storage connection: ${config.connectionName}`,
-		`storage location: ${safeTerminalText(backend.destination)}`,
-		`included content: ${config.include.join(", ") || "none"}`,
-		`sessions: ${config.include.includes("sessions") ? "included" : "excluded"}`,
-		formatRemoteSelectionStatus(selectionState),
-		...warnings,
-	].join("\n");
-	const level = warnings.length > 0 || selectionState?.kind === "different" ? "warning" : "info";
-	if (!remote) {
-		ctx.ui.notify(
-			`${header}\n\n${formatSnapshotOnlyDiff("Remote is empty. Local push would upload", local)}`,
-			level,
-		);
-		return;
-	}
-
-	ctx.ui.notify(`${header}\n\n${formatDiff(local, remote)}`, level);
+	const { text, level } = formatDiffSummary(
+		config,
+		backend,
+		local,
+		remote,
+		selectionState,
+		syncSessionsWarnings(config),
+	);
+	ctx.ui.notify(text, level);
 }
 
 export async function doctor(
@@ -215,82 +303,43 @@ export async function doctor(
 	options: CommandOptions,
 	factory: SyncBackendFactory = createSyncBackend,
 ) {
-	const messages: string[] = [];
-	let level: "info" | "warning" = "info";
-	let snapshotOptions: SnapshotOptions = {};
-	let profile = DEFAULT_PROFILE;
+	let config: AnySyncConfig | undefined;
 	let backend: SyncBackend | undefined;
-	let backendSummary: string[] = [];
+	let configError: unknown;
 
 	try {
-		const config = await loadConfig(options.setup);
+		config = await loadConfig(options.setup);
 		throwIfAborted(options.signal);
-		backend = await backendFor(config, factory);
-		profile = config.snapshotIdentity;
-		snapshotOptions = snapshotOptionsForContext(ctx, config);
-		messages.push(
-			`config: ok (sync setup ${config.setupName})`,
-			`included content: ${config.include.join(", ") || "none"}`,
-			`sessions: ${config.include.includes("sessions") ? "included" : "excluded"}`,
-		);
-		backendSummary = [
-			`storage location: ${safeTerminalText(backend.destination)}`,
-			`publication safety: ${publicationCapabilityDescription(backend.capability)}`,
-		];
-		const warnings = syncSessionsWarnings(config);
-		if (warnings.length > 0) {
-			level = "warning";
-			messages.push(...warnings);
-		}
+		backend = await factory(config);
 	} catch (error) {
 		throwIfAborted(options.signal);
-		level = "warning";
-		messages.push(`config: ${errorMessage(error)}`);
+		configError = error;
 	}
 
-	const local = await createSnapshot(profile, snapshotOptions);
+	const local = await createSnapshot(
+		config?.snapshotIdentity ?? DEFAULT_PROFILE,
+		config ? snapshotOptionsForContext(ctx, config) : {},
+	);
 	throwIfAborted(options.signal);
-	const secrets = scanSnapshot(local);
-	if (secrets.length > 0) {
-		level = "warning";
-		messages.push("secret scan: possible secrets found:");
-		messages.push(...secrets.map((secret) => `- ${secret}`));
-	} else {
-		messages.push(`secret scan: ok (${local.files.length} files checked)`);
-	}
-
 	const lock = await inspectLock();
 	throwIfAborted(options.signal);
-	if (lock.status === "valid" && isStaleLock(lock.lock)) {
-		level = "warning";
-		messages.push(
-			`lock: stale (pid ${lock.lock.pid}); run /sync unlock after verifying no sync is running`,
-		);
-	} else if (lock.status === "valid") {
-		messages.push(`lock: held by pid ${lock.lock.pid} since ${lock.lock.startedAt}`);
-	} else if (lock.status === "unreadable") {
-		level = "warning";
-		messages.push(
-			"lock: unreadable; use /sync unlock --stale only after verifying no sync is running",
-		);
-	} else if (await isLockGuardHeld()) {
-		throwIfAborted(options.signal);
-		level = "warning";
-		messages.push("lock: guard active while metadata is missing or still being initialized");
-	} else {
-		messages.push("lock: free");
-	}
+	const guardHeld = lock.status === "missing" ? await isLockGuardHeld() : false;
+	throwIfAborted(options.signal);
+	const diagnostics = backend ? await backend.diagnose(options.signal) : [];
+	throwIfAborted(options.signal);
 
-	if (backend) {
-		messages.push(...backendSummary);
-		const diagnostics = await backend.diagnose(options.signal);
-		throwIfAborted(options.signal);
-		for (const diagnostic of diagnostics) {
-			messages.push(diagnostic.message);
-			if (diagnostic.level !== "info") level = "warning";
-		}
-	}
-	ctx.ui.notify(messages.join("\n"), level);
+	const { text, level } = formatDoctorMessages(
+		config,
+		backend,
+		local,
+		scanSnapshot(local),
+		lock,
+		guardHeld,
+		config ? syncSessionsWarnings(config) : [],
+		configError,
+		diagnostics,
+	);
+	ctx.ui.notify(text, level);
 }
 
 export async function push(
@@ -302,12 +351,10 @@ export async function push(
 	const config = input?.config ?? (await loadConfig(options.setup));
 	throwIfAborted(options.signal);
 	ctx.ui.setStatus(STATUS_KEY, `pushing ${config.setupName}`);
-	const backend = input?.backend ?? (await backendFor(config, factory));
+	const backend = input?.backend ?? (await factory(config));
 	const state = input?.state ?? (await readStateForConfig(config));
 	throwIfAborted(options.signal);
-	const local =
-		input?.local ??
-		(await createSnapshot(config.snapshotIdentity, snapshotOptionsForContext(ctx, config)));
+	const local = input?.local ?? (await localSnapshotForContext(ctx, config));
 	throwIfAborted(options.signal);
 
 	let head = await backend.readHead(options.signal);
@@ -318,60 +365,80 @@ export async function push(
 		state,
 		options.signal,
 	);
-	if (
-		!options.force &&
-		!remoteForUpload &&
-		head?.selection &&
-		inspectRemoteSelection(config.include, { selection: head.selection, files: [] }).kind ===
-			"different"
-	) {
-		remoteForUpload = await readSnapshotForHead(backend, head, options.signal);
-	}
-	if (remoteForUpload && !options.force) {
-		requireCompatibleRemoteSelection(config, remoteForUpload);
-	}
-	if (
-		remoteChangedSinceState(head, state, config, (left, right) =>
-			backend.sameRevision(left, right),
-		) &&
-		!options.force
-	) {
-		const remoteForConflict = remoteForUpload
-			? filterSnapshotForConfigPolicy(remoteForUpload, config)
-			: undefined;
-		if (!remoteForConflict || !snapshotHashesMatchState(remoteForConflict, state, config)) {
-			throw createSyncDecision({
-				kind: head ? "remote-or-policy-changed" : "remote-empty",
-				config,
-				state,
-				local,
-				remote: remoteForConflict,
-				localChanged: hasLocalChanges(local, state, config),
-				remoteChanged: true,
-				directMessage:
-					"Remote or sync policy changed since last sync. Run /sync pull first or /sync push --force.",
-			});
-		}
-	}
-
-	let upload = await snapshotForUpload(
-		backend,
-		config,
-		local,
-		head,
-		remoteForUpload,
-		options.signal,
-	);
-	if (!config.skipSecretScan) {
-		const secrets = scanSnapshot(local);
-		if (secrets.length > 0) {
-			throw new Error(
-				`Refusing to push possible secrets:\n${secrets.map((s) => `- ${s}`).join("\n")}`,
+	if (!options.force) {
+		if (
+			!remoteForUpload &&
+			head?.selection &&
+			inspectRemoteSelection(config.include, {
+				selection: head.selection,
+				files: [],
+			}).kind === "different"
+		) {
+			remoteForUpload = await readSnapshotForHead(
+				backend,
+				head,
+				options.signal,
 			);
 		}
+		if (remoteForUpload)
+			requireCompatibleRemoteSelection(config, remoteForUpload);
+		if (
+			remoteChangedSinceState(head, state, config, (left, right) =>
+				backend.sameRevision(left, right),
+			)
+		) {
+			const remoteForConflict = remoteForUpload
+				? filterSnapshotForConfigPolicy(remoteForUpload, config)
+				: undefined;
+			if (
+				!remoteForConflict ||
+				!snapshotHashesMatchState(remoteForConflict, state, config)
+			) {
+				throw createSyncDecision({
+					kind: head ? "remote-or-policy-changed" : "remote-empty",
+					config,
+					state,
+					local,
+					remote: remoteForConflict,
+					localChanged: hasLocalChanges(local, state, config),
+					remoteChanged: true,
+					directMessage:
+						"Remote or sync policy changed since last sync. Run /sync pull first or /sync push --force.",
+				});
+			}
+		}
 	}
 
-	if (!(await confirmPush(ctx, options, config, backend, local, upload, head, remoteForUpload))) {
+	async function prepareUpload(
+		uploadHead: RemoteHead | undefined,
+		remote: Snapshot | undefined,
+	) {
+		const uploadSnapshot = await snapshotForUpload(
+			backend,
+			config,
+			local,
+			uploadHead,
+			remote,
+			options.signal,
+		);
+		assertSafeUploadSnapshot(uploadSnapshot, config);
+		return uploadSnapshot;
+	}
+
+	let upload = await prepareUpload(head, remoteForUpload);
+
+	if (
+		!(await confirmPush(
+			ctx,
+			options,
+			config,
+			backend,
+			local,
+			upload,
+			head,
+			remoteForUpload,
+		))
+	) {
 		return "cancelled" as const;
 	}
 
@@ -382,14 +449,7 @@ export async function push(
 			remoteForUpload = head
 				? await backend.readSnapshot(head.snapshotRef, options.signal)
 				: undefined;
-			upload = await snapshotForUpload(
-				backend,
-				config,
-				local,
-				head,
-				remoteForUpload,
-				options.signal,
-			);
+			upload = await prepareUpload(head, remoteForUpload);
 			if (
 				!(await confirmPush(
 					ctx,
@@ -408,33 +468,22 @@ export async function push(
 		}
 	}
 
-	const result = await backend.publishSnapshot(upload, expectedRemoteHead(head), {
-		signal: options.signal,
-		onCommit: options.onCommit,
-	});
-	try {
-		await writeStateForConfig(config, {
-			version: VERSION,
-			profile: config.snapshotIdentity,
-			lastAppliedSnapshot: result.head.snapshotId,
-			lastRemoteRevision: result.head.revision,
-			lastFileHashes: fileHashMap(local),
-			include: [...config.include],
-		});
-	} catch (error) {
-		throw new PublicationStatePersistenceError(result.head, error);
-	}
+	const result = await backend.publishSnapshot(
+		upload,
+		expectedRemoteHead(head),
+		{
+			signal: options.signal,
+			onCommit: options.onCommit,
+		},
+	);
+	await persistPublicationState(config, result.head, fileHashMap(local));
 	if (options.signal?.aborted) return;
 	ctx.ui.setStatus(STATUS_KEY, undefined);
 	if (!options.silent) {
-		ctx.ui.notify(
-			[
-				`Pushed ${upload.files.length} files from sync setup “${config.setupName}” as ${result.head.snapshotId}.`,
-				...result.warnings,
-			]
-				.filter(Boolean)
-				.join("\n"),
-			result.warnings.length > 0 ? "warning" : "info",
+		notifySnapshotResult(
+			ctx,
+			`Pushed ${upload.files.length} files from sync setup “${config.setupName}” as ${result.head.snapshotId}.`,
+			result.warnings,
 		);
 	}
 	return "applied" as const;
@@ -448,15 +497,16 @@ export async function pull(
 	const config = await loadConfig(options.setup);
 	throwIfAborted(options.signal);
 	ctx.ui.setStatus(STATUS_KEY, `pulling ${config.setupName}`);
-	const backend = await backendFor(config, factory);
+	const backend = await factory(config);
 	const state = await readStateForConfig(config);
 	throwIfAborted(options.signal);
-	const local = await createSnapshot(
-		config.snapshotIdentity,
-		snapshotOptionsForContext(ctx, config),
-	);
+	const local = await localSnapshotForContext(ctx, config);
 	throwIfAborted(options.signal);
-	const { head, snapshot: remote } = await readRemoteSnapshot(backend, config, options.signal);
+	const { head, snapshot: remote } = await readRemoteSnapshot(
+		backend,
+		config,
+		options.signal,
+	);
 	throwIfAborted(options.signal);
 	const localChanged = hasLocalChanges(local, state, config);
 	if (!remote) {
@@ -467,29 +517,39 @@ export async function pull(
 			local,
 			localChanged,
 			remoteChanged: false,
-			directMessage: "Remote is empty. Run /sync push from a configured machine first.",
+			directMessage:
+				"Remote is empty. Run /sync push from a configured machine first.",
 		});
 	}
 
-	const remoteChanged = hasRemoteChanges(remote, state, config, protectedSessionPaths(ctx));
-	if (localChanged && remoteChanged && state.lastAppliedSnapshot && !options.force) {
-		throw createSyncDecision({
-			kind: "both-changed",
+	const remoteChanged = hasRemoteChanges(
+		remote,
+		state,
+		config,
+		protectedSessionPaths(ctx),
+	);
+	if (
+		localChanged &&
+		remoteChanged &&
+		state.lastAppliedSnapshot &&
+		!options.force
+	) {
+		throw divergedDecision(
+			"both-changed",
 			config,
 			state,
 			local,
 			remote,
-			localChanged,
-			remoteChanged,
-			directMessage:
-				"Both local and remote changed since last sync. Run /sync diff, then choose /sync pull --force or /sync push --force.",
-		});
+			"Both local and remote changed since last sync. Run /sync diff, then choose /sync pull --force or /sync push --force.",
+		);
 	}
 
 	if (
-		!options.yes &&
-		!(await ctx.ui.confirm(
-			snapshotIncludesSessions(remote) ? "Pull pi settings and sessions?" : "Pull pi settings?",
+		!(await confirmOperation(
+			ctx,
+			options,
+			"Pull",
+			sessionAwareTitle("Pull", remote),
 			formatPullSummary(
 				config,
 				backend.destination,
@@ -499,32 +559,17 @@ export async function pull(
 			),
 		))
 	) {
-		ctx.ui.setStatus(STATUS_KEY, undefined);
-		ctx.ui.notify("Pull cancelled.", "info");
 		return "cancelled" as const;
 	}
 
 	throwIfAborted(options.signal);
-	const backup = await backupLocal(
-		config.snapshotIdentity,
-		snapshotOptionsForContext(ctx, config),
-		options.signal,
+	const { backup, lastFileHashes } = await backupAndApplyRemote(
+		ctx,
+		config,
+		remote,
+		options,
 	);
-	const applySessionDir = await sessionDirForApply(ctx, remote);
-	throwIfAborted(options.signal);
-	options.onCommit?.();
-	const lastFileHashes = await applySnapshot(remote, protectedSessionPaths(ctx), {
-		include: config.include,
-		sessionDir: applySessionDir,
-	});
-	await writeStateForConfig(config, {
-		version: VERSION,
-		profile: config.snapshotIdentity,
-		lastAppliedSnapshot: remote.id,
-		lastRemoteRevision: head?.revision,
-		lastFileHashes,
-		include: [...config.include],
-	});
+	await recordAppliedState(config, remote.id, head?.revision, lastFileHashes);
 	if (options.signal?.aborted) return "applied" as const;
 	ctx.ui.setStatus(STATUS_KEY, undefined);
 	if (!options.silent) {
@@ -553,13 +598,10 @@ export async function syncBoth(
 ) {
 	const config = await loadConfig(options.setup);
 	throwIfAborted(options.signal);
-	const backend = await backendFor(config, factory);
+	const backend = await factory(config);
 	const state = await readStateForConfig(config);
 	throwIfAborted(options.signal);
-	const local = await createSnapshot(
-		config.snapshotIdentity,
-		snapshotOptionsForContext(ctx, config),
-	);
+	const local = await localSnapshotForContext(ctx, config);
 	throwIfAborted(options.signal);
 	if (config.include.length === 0) {
 		if (!options.silent) {
@@ -570,103 +612,93 @@ export async function syncBoth(
 		}
 		return;
 	}
-	const { head, snapshot: remote } = await readRemoteSnapshot(backend, config, options.signal);
+	const { head, snapshot: remote } = await readRemoteSnapshot(
+		backend,
+		config,
+		options.signal,
+	);
 	throwIfAborted(options.signal);
 	const localChanged = hasLocalChanges(local, state, config);
 	const remoteChanged = remote
 		? hasRemoteChanges(remote, state, config, protectedSessionPaths(ctx))
 		: false;
 	const firstSync = !state.lastAppliedSnapshot;
+	const markUpToDate = async (
+		remoteSnapshot: Snapshot,
+		message = "pi-sync is already up to date.",
+	) => {
+		await recordAppliedState(
+			config,
+			remoteSnapshot.id,
+			head?.revision,
+			fileHashMap(remoteSnapshot),
+		);
+		if (!options.silent) ctx.ui.notify(message, "info");
+	};
 
-	if (firstSync && remote && remote.files.length > 0 && local.files.length > 0) {
+	if (firstSync && remote?.files.length && local.files.length) {
 		if (!canPullRemoteSettingsOnFirstSync(local, remote)) {
-			throw createSyncDecision({
-				kind: "first-sync-settings-diverged",
+			throw divergedDecision(
+				"first-sync-settings-diverged",
 				config,
 				state,
 				local,
 				remote,
-				localChanged: true,
-				remoteChanged: true,
-				directMessage:
-					"Remote settings exist and this machine has different local Pi settings. Run /sync diff, then manually choose /sync pull or /sync push.",
-			});
+				"Remote settings exist and this machine has different local Pi settings. Run /sync diff, then manually choose /sync pull or /sync push.",
+			);
 		}
 		if (!sameHashes(fileHashMap(local), fileHashMap(remote))) {
 			if (!canPullRemoteSessionsOnFirstSync(local, remote)) {
-				throw createSyncDecision({
-					kind: "first-sync-sessions-diverged",
+				throw divergedDecision(
+					"first-sync-sessions-diverged",
 					config,
 					state,
 					local,
 					remote,
-					localChanged: true,
-					remoteChanged: true,
-					directMessage:
-						"Remote settings match, but local and remote Pi sessions differ. Run /sync diff, then manually choose /sync pull or /sync push.",
-				});
+					"Remote settings match, but local and remote Pi sessions differ. Run /sync diff, then manually choose /sync pull or /sync push.",
+				);
 			}
 			await pull(ctx, options, factory);
 			return;
 		}
-		await writeStateForConfig(config, {
-			version: VERSION,
-			profile: config.snapshotIdentity,
-			lastAppliedSnapshot: remote.id,
-			lastRemoteRevision: head?.revision,
-			lastFileHashes: fileHashMap(remote),
-			include: [...config.include],
-		});
-		if (!options.silent)
-			ctx.ui.notify("pi-sync state initialized; local settings already match remote.", "info");
+		await markUpToDate(
+			remote,
+			"pi-sync state initialized; local settings already match remote.",
+		);
 		return;
 	}
-	if (localChanged && remoteChanged && remote && snapshotsMatch(local, remote)) {
-		await writeStateForConfig(config, {
-			version: VERSION,
-			profile: config.snapshotIdentity,
-			lastAppliedSnapshot: remote.id,
-			lastRemoteRevision: head?.revision,
-			lastFileHashes: fileHashMap(remote),
-			include: [...config.include],
-		});
-		if (!options.silent) ctx.ui.notify("pi-sync is already up to date.", "info");
+	if (
+		localChanged &&
+		remoteChanged &&
+		remote &&
+		snapshotsMatch(local, remote)
+	) {
+		await markUpToDate(remote);
 		return;
 	}
 	if (localChanged && remoteChanged && state.lastAppliedSnapshot) {
-		throw createSyncDecision({
-			kind: "both-changed",
+		throw divergedDecision(
+			"both-changed",
 			config,
 			state,
 			local,
 			remote,
-			localChanged,
-			remoteChanged,
-			directMessage:
-				"Both local and remote changed. Run /sync diff and resolve with push --force or pull --force.",
-		});
+			"Both local and remote changed. Run /sync diff and resolve with push --force or pull --force.",
+		);
 	}
-	if (remoteChanged) {
-		await pull(ctx, options, factory);
-		return;
-	}
-	if (localChanged || !remote) {
-		await push(ctx, options, undefined, factory);
-		return;
-	}
+	if (remoteChanged) return pull(ctx, options, factory);
+	if (localChanged || !remote) return push(ctx, options, undefined, factory);
 	if (
 		shouldRefreshSyncedState(remote, head, state, config, (left, right) =>
 			backend.sameRevision(left, right),
 		)
 	) {
-		await writeStateForConfig(config, {
-			version: VERSION,
-			profile: config.snapshotIdentity,
-			lastAppliedSnapshot: remote.id,
-			lastRemoteRevision: head?.revision,
-			lastFileHashes: fileHashMap(remote),
-			include: [...config.include],
-		});
+		await recordAppliedState(
+			config,
+			remote.id,
+			head?.revision,
+			fileHashMap(remote),
+		);
 	}
 	if (!options.silent) ctx.ui.notify("pi-sync is already up to date.", "info");
 }
@@ -678,8 +710,10 @@ export async function history(
 ) {
 	const config = await loadConfig(options.setup);
 	throwIfAborted(options.signal);
-	const backend = await backendFor(config, factory);
-	const snapshots = (await backend.listHistory(options.signal)).slice(-20).reverse();
+	const backend = await factory(config);
+	const snapshots = (await backend.listHistory(options.signal))
+		.slice(-20)
+		.reverse();
 	throwIfAborted(options.signal);
 	if (snapshots.length === 0) {
 		ctx.ui.notify("No remote pi-sync history found.", "info");
@@ -690,7 +724,7 @@ export async function history(
 	if (ctx.mode === "tui") {
 		const labels = snapshots.map(
 			(item, index) =>
-				`${index + 1}. ${item.createdAt} · ${safeTerminalText(item.machine)} · ${item.snapshotId}${item.snapshotId === currentSnapshot ? " (current)" : ""}${item.syncSessions ? " · sessions" : ""}`,
+				`${index + 1}. ${formatSnapshotHistoryLabel(item, item.snapshotId === currentSnapshot)}`,
 		);
 		const selected = await ctx.ui.select(
 			`History for sync setup “${safeTerminalText(config.setupName)}”\n\nChoose a snapshot to preview rollback.`,
@@ -698,20 +732,27 @@ export async function history(
 		);
 		if (!selected || selected === "Back") return;
 		throwIfAborted(options.signal);
-		const index = labels.indexOf(selected);
-		const snapshot = snapshots[index];
+		const snapshot = snapshots[labels.indexOf(selected)];
 		if (!snapshot) return;
 		await withLock("rollback", () =>
-			rollback(ctx, { ...options, args: [snapshot.snapshotRef], yes: false }, factory, {
-				backendIdentity: backend.identity,
-				setup: config.setupName,
-			}),
+			rollback(
+				ctx,
+				{ ...options, args: [snapshot.snapshotRef], yes: false },
+				factory,
+				{
+					backendIdentity: backend.identity,
+					setup: config.setupName,
+				},
+			),
 		);
 		return;
 	}
 	ctx.ui.notify(
 		snapshots
-			.map((item) => `${item.snapshotRef} ${item.createdAt} ${safeTerminalText(item.machine)}`)
+			.map(
+				(item) =>
+					`${item.snapshotRef} ${item.createdAt} ${safeTerminalText(item.machine)}`,
+			)
 			.join("\n"),
 		"info",
 	);
@@ -728,7 +769,7 @@ export async function rollback(
 
 	const config = await loadConfig(options.setup);
 	throwIfAborted(options.signal);
-	const backend = await backendFor(config, factory);
+	const backend = await factory(config);
 	if (
 		expectedSelection &&
 		(backend.identity !== expectedSelection.backendIdentity ||
@@ -740,23 +781,22 @@ export async function rollback(
 	}
 	const decoded = await backend.readSnapshot(target, options.signal);
 	const selected = filterSnapshotForConfigPolicy(
-		config.include.includes("sessions") ? decoded : snapshotWithoutSessions(decoded),
+		config.include.includes("sessions")
+			? decoded
+			: snapshotWithoutSessions(decoded),
 		config,
 	);
 	const remote = regenerateSnapshotIdentity(selected);
-	const local = await createSnapshot(
-		config.snapshotIdentity,
-		snapshotOptionsForContext(ctx, config),
-	);
+	const local = await localSnapshotForContext(ctx, config);
 	const expectedHead = await backend.readHead(options.signal);
 	throwIfAborted(options.signal);
 
 	if (
-		!options.yes &&
-		!(await ctx.ui.confirm(
-			snapshotIncludesSessions(remote)
-				? "Rollback pi settings and sessions?"
-				: "Rollback pi settings?",
+		!(await confirmOperation(
+			ctx,
+			options,
+			"Rollback",
+			sessionAwareTitle("Rollback", remote),
 			formatRollbackSummary(
 				config,
 				backend.destination,
@@ -767,23 +807,16 @@ export async function rollback(
 			),
 		))
 	) {
-		ctx.ui.notify("Rollback cancelled.", "info");
 		return;
 	}
 
 	throwIfAborted(options.signal);
-	const backup = await backupLocal(
-		config.snapshotIdentity,
-		snapshotOptionsForContext(ctx, config),
-		options.signal,
+	const { backup, lastFileHashes } = await backupAndApplyRemote(
+		ctx,
+		config,
+		remote,
+		options,
 	);
-	const applySessionDir = await sessionDirForApply(ctx, remote);
-	throwIfAborted(options.signal);
-	options.onCommit?.();
-	const lastFileHashes = await applySnapshot(remote, protectedSessionPaths(ctx), {
-		include: config.include,
-		sessionDir: applySessionDir,
-	});
 	let result: PublishSnapshotResult;
 	try {
 		const completionSignal = AbortSignal.timeout(POST_LOCAL_COMMIT_TIMEOUT_MS);
@@ -796,41 +829,32 @@ export async function rollback(
 			completionSignal,
 			{ ignoreUnreadableRemote: true },
 		);
-		result = await backend.publishSnapshot(upload, expectedRemoteHead(expectedHead), {
-			signal: completionSignal,
-		});
+		result = await backend.publishSnapshot(
+			upload,
+			expectedRemoteHead(expectedHead),
+			{
+				signal: completionSignal,
+			},
+		);
 	} catch (error) {
 		throw new RollbackPublicationError(backup, error);
 	}
-	try {
-		await writeStateForConfig(config, {
-			version: VERSION,
-			profile: config.snapshotIdentity,
-			lastAppliedSnapshot: result.head.snapshotId,
-			lastRemoteRevision: result.head.revision,
-			lastFileHashes,
-			include: [...config.include],
-		});
-	} catch (error) {
-		throw new PublicationStatePersistenceError(result.head, error, backup);
-	}
+	await persistPublicationState(config, result.head, lastFileHashes, backup);
 	if (options.signal?.aborted) return;
-	ctx.ui.notify(
-		[
-			`Rolled back sync setup “${config.setupName}” to ${target}; latest: ${result.head.snapshotId}. Backup: ${backup}`,
-			...result.warnings,
-		]
-			.filter(Boolean)
-			.join("\n"),
-		result.warnings.length > 0 ? "warning" : "info",
+	notifySnapshotResult(
+		ctx,
+		`Rolled back sync setup “${config.setupName}” to ${target}; latest: ${result.head.snapshotId}. Backup: ${backup}`,
+		result.warnings,
 	);
 	await maybeReload(ctx, options.signal);
 }
 
-function protectedSessionPaths(ctx: ExtensionCommandContext | ExtensionContext) {
-	const getSessionFile = ctx.sessionManager.getSessionFile;
-	if (typeof getSessionFile !== "function") return new Set<string>();
-	const sessionFile = getSessionFile.call(ctx.sessionManager) as string | undefined;
+function protectedSessionPaths(
+	ctx: ExtensionCommandContext | ExtensionContext,
+) {
+	const sessionFile = ctx.sessionManager?.getSessionFile?.() as
+		| string
+		| undefined;
 	const snapshotPath = sessionFile
 		? sessionSnapshotPathFromAbsolute(sessionFile, sessionDirFromContext(ctx))
 		: undefined;
@@ -847,27 +871,17 @@ function snapshotOptionsForContext(
 	};
 }
 
-function sessionDirFromContext(ctx: ExtensionCommandContext | ExtensionContext) {
-	const manager = ctx.sessionManager as typeof ctx.sessionManager & {
-		usesDefaultSessionDir?: () => boolean;
-	};
-	const usesDefaultSessionDir = manager.usesDefaultSessionDir;
-	if (typeof usesDefaultSessionDir === "function" && usesDefaultSessionDir.call(manager)) {
-		return undefined;
-	}
-	const getSessionDir = manager.getSessionDir;
-	return typeof getSessionDir === "function"
-		? (getSessionDir.call(manager) as string | undefined)
-		: undefined;
-}
-
-async function maybeReload(ctx: ExtensionCommandContext | ExtensionContext, signal?: AbortSignal) {
+async function maybeReload(
+	ctx: ExtensionCommandContext | ExtensionContext,
+	signal?: AbortSignal,
+) {
 	if (signal?.aborted || !("reload" in ctx)) return;
 	if (
 		ctx.hasUI &&
 		(await ctx.ui.confirm(
 			"Reload Pi resources now?",
 			"This reloads extensions, skills, prompts, themes, and context files.",
+			{ signal },
 		))
 	) {
 		if (signal?.aborted) return;
@@ -886,7 +900,8 @@ async function readRemoteSnapshotForUpload(
 		!head ||
 		(head.snapshotId === state.lastAppliedSnapshot &&
 			!syncPolicyChanged(state, config) &&
-			(!state.lastRemoteRevision || backend.sameRevision(head.revision, state.lastRemoteRevision)))
+			(!state.lastRemoteRevision ||
+				backend.sameRevision(head.revision, state.lastRemoteRevision)))
 	) {
 		return undefined;
 	}
@@ -915,6 +930,17 @@ async function snapshotForUpload(
 	return mergeRemotePreservedFiles(local, snapshot, config);
 }
 
+function assertSafeUploadSnapshot(upload: Snapshot, config: AnySyncConfig) {
+	if (!config.skipSecretScan) {
+		const secrets = scanSnapshot(upload);
+		if (secrets.length > 0) {
+			throw new Error(
+				`Refusing to push possible secrets:\n${secrets.map((s) => `- ${s}`).join("\n")}`,
+			);
+		}
+	}
+}
+
 async function readRemoteSnapshot(
 	backend: SyncBackend,
 	config: AnySyncConfig,
@@ -922,18 +948,45 @@ async function readRemoteSnapshot(
 	options: { allowSelectionDifference?: boolean } = {},
 ) {
 	const head = await backend.readHead(signal);
-	if (!head) return { head: undefined, snapshot: undefined, selectionState: undefined };
+	if (!head)
+		return { head: undefined, snapshot: undefined, selectionState: undefined };
 	const snapshot = await readSnapshotForHead(backend, head, signal);
 	const selectionState = inspectRemoteSelection(config.include, snapshot);
-	if (!options.allowSelectionDifference && selectionState.kind === "different") {
+	if (
+		!options.allowSelectionDifference &&
+		selectionState.kind === "different"
+	) {
 		const configIdentity = syncConfigReviewFingerprint(config);
-		throw remoteSelectionMismatch(config, selectionState.include, configIdentity);
+		throw remoteSelectionMismatch(
+			config,
+			selectionState.include,
+			configIdentity,
+		);
 	}
 	return {
 		head,
 		snapshot: filterSnapshotForConfigPolicy(snapshot, config),
 		selectionState,
 	};
+}
+
+async function confirmOperation(
+	ctx: ExtensionCommandContext | ExtensionContext,
+	options: CommandOptions,
+	verb: string,
+	title: string,
+	summary: string,
+) {
+	throwIfAborted(options.signal);
+	if (options.yes) return true;
+	const confirmed = await ctx.ui.confirm(title, summary, {
+		signal: options.signal,
+	});
+	throwIfAborted(options.signal);
+	if (confirmed) return true;
+	ctx.ui.setStatus(STATUS_KEY, undefined);
+	ctx.ui.notify(`${verb} cancelled.`, "info");
+	return false;
 }
 
 async function confirmPush(
@@ -945,11 +998,12 @@ async function confirmPush(
 	upload: Snapshot,
 	head: RemoteHead | undefined,
 	remote: Snapshot | undefined,
-	title = snapshotIncludesSessions(upload) ? "Push pi settings and sessions?" : "Push pi settings?",
+	title = sessionAwareTitle("Push", upload),
 ) {
-	throwIfAborted(options.signal);
-	if (options.yes) return true;
-	const confirmed = await ctx.ui.confirm(
+	return confirmOperation(
+		ctx,
+		options,
+		"Push",
 		title,
 		formatPushSummary(
 			config,
@@ -960,11 +1014,6 @@ async function confirmPush(
 			remote,
 		),
 	);
-	throwIfAborted(options.signal);
-	if (confirmed) return true;
-	ctx.ui.setStatus(STATUS_KEY, undefined);
-	ctx.ui.notify("Push cancelled.", "info");
-	return false;
 }
 
 function throwIfAborted(signal?: AbortSignal) {
@@ -979,8 +1028,9 @@ function sameRemoteHead(
 	left: RemoteHead | undefined,
 	right: RemoteHead | undefined,
 ) {
-	if (!left || !right) return left === right;
-	return backend.sameRevision(left.revision, right.revision);
+	return !left || !right
+		? left === right
+		: backend.sameRevision(left.revision, right.revision);
 }
 
 export async function backupLocal(
@@ -995,8 +1045,6 @@ export async function backupLocal(
 	await fs.mkdir(backupDirectory, { recursive: true });
 	throwIfAborted(signal);
 	const backupPath = path.join(backupDirectory, `${snapshot.id}.json.gz`);
-	const encoded = await encodeSnapshot(snapshot);
-	throwIfAborted(signal);
-	await fs.writeFile(backupPath, encoded, { signal });
+	await fs.writeFile(backupPath, await encodeSnapshot(snapshot), { signal });
 	return backupPath;
 }

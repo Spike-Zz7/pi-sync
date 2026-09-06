@@ -4,7 +4,10 @@ import type {
 	RunRoute,
 	RunRouteResult,
 } from "./cancellable-operation.js";
-import { type RemoteSelectionOrigin, showRemoteSelectionReview } from "./remote-selection-ui.js";
+import {
+	type RemoteSelectionOrigin,
+	showRemoteSelectionReview,
+} from "./remote-selection-ui.js";
 import { showSyncResolution } from "./sync-resolution-ui.js";
 
 const MAX_DECISION_TRANSITIONS = 32;
@@ -32,7 +35,11 @@ export async function dispatchManagerResult(
 	let currentRoute: "sync" | "pull" | "push" = origin;
 	let resolving = false;
 
-	for (let transition = 0; transition < MAX_DECISION_TRANSITIONS; transition += 1) {
+	for (
+		let transition = 0;
+		transition < MAX_DECISION_TRANSITIONS;
+		transition += 1
+	) {
 		if (signal?.aborted) return { kind: "close" };
 		if (result.kind === "remote-selection-required") {
 			resolving = true;
@@ -61,7 +68,12 @@ export async function dispatchManagerResult(
 		}
 		if (result.kind === "decision-required") {
 			resolving = true;
-			const resolution = await showSyncResolution(ctx, result.decision, runRoute, signal);
+			const resolution = await showSyncResolution(
+				ctx,
+				result.decision,
+				runRoute,
+				signal,
+			);
 			if (resolution.kind === "route-result") {
 				result = resolution.result;
 				currentRoute = resolution.route;
@@ -76,7 +88,8 @@ export async function dispatchManagerResult(
 		}
 		if (result.kind === "closed") return { kind: "close" };
 		if (result.kind === "completed") {
-			const appliedRoute = result.outcome === "applied" ? currentRoute : undefined;
+			const appliedRoute =
+				result.outcome === "applied" ? currentRoute : undefined;
 			if (resolving || (origin === "pull" && result.outcome === "applied")) {
 				return { kind: "close", ...(appliedRoute ? { appliedRoute } : {}) };
 			}

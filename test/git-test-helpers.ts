@@ -8,7 +8,11 @@ export function gitConfig(remote: string): ResolvedGitBackend {
 	return {
 		type: "git",
 		profile: { kind: "git", remote },
-		destination: { branch: "pi-sync/default", directory: "pi-sync", namespace: "default" },
+		destination: {
+			branch: "pi-sync/default",
+			directory: "pi-sync",
+			namespace: "default",
+		},
 	};
 }
 

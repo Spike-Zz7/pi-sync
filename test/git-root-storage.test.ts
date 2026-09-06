@@ -27,7 +27,10 @@ test("Git root publication uses literal root files and survives a fresh cache", 
 			["--git-dir", fixture.remote, "ls-tree", "-r", "--name-only", "main"],
 			{ encoding: "utf8" },
 		);
-		assert.deepEqual(tree.trim().split("\n"), ["files/settings.json", "manifest.json"]);
+		assert.deepEqual(tree.trim().split("\n"), [
+			"files/settings.json",
+			"manifest.json",
+		]);
 		const fresh = new GitSyncBackend(config, {
 			cacheRoot: path.join(fixture.root, "fresh-cache"),
 			allowLocalRemotes: true,
@@ -69,7 +72,13 @@ test("Git root refuses an unrelated existing main branch without changing it", a
 				},
 			},
 		).trim();
-		execFileSync("git", ["--git-dir", fixture.remote, "update-ref", "refs/heads/main", commit]);
+		execFileSync("git", [
+			"--git-dir",
+			fixture.remote,
+			"update-ref",
+			"refs/heads/main",
+			commit,
+		]);
 		const config = gitConfig(fixture.remote);
 		config.destination = { branch: "main", directory: "./", namespace: "root" };
 		const backend = new GitSyncBackend(config, {
@@ -78,7 +87,10 @@ test("Git root refuses an unrelated existing main branch without changing it", a
 		});
 		await assert.rejects(backend.readHead(), /manifest|publication/iu);
 		await assert.rejects(
-			backend.publishSnapshot({ ...snapshot([]), profile: "root" }, { kind: "missing" }),
+			backend.publishSnapshot(
+				{ ...snapshot([]), profile: "root" },
+				{ kind: "missing" },
+			),
 		);
 		assert.equal(
 			execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "main"], {

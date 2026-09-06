@@ -5,12 +5,17 @@ import { registerSyncBackendContractSuite } from "./backend-contract-suite.js";
 import { snapshot } from "./helpers.js";
 import { MemorySyncBackend } from "./memory-sync-backend.js";
 
-registerSyncBackendContractSuite("memory backend", () => new MemorySyncBackend());
+registerSyncBackendContractSuite(
+	"memory backend",
+	() => new MemorySyncBackend(),
+);
 
 test("memory backend distinguishes an unknown post-commit publication outcome", async () => {
 	const backend = new MemorySyncBackend();
 	backend.failNextPublicationAfterCommit = true;
-	const value = snapshot([{ path: "settings.json", content: Buffer.from("committed") }]);
+	const value = snapshot([
+		{ path: "settings.json", content: Buffer.from("committed") },
+	]);
 
 	await assert.rejects(
 		backend.publishSnapshot(value, { kind: "missing" }),

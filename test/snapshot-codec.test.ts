@@ -7,9 +7,15 @@ import { snapshot } from "./helpers.js";
 test("snapshot codec preserves portable selection intent and rejects malformed policy", async () => {
 	const selected = {
 		...snapshot([]),
-		selection: { version: 1 as const, include: ["settings.json", "pi-starship.toml"] },
+		selection: {
+			version: 1 as const,
+			include: ["settings.json", "pi-starship.toml"],
+		},
 	};
-	assert.deepEqual(await decodeSnapshot(await encodeSnapshot(selected)), selected);
+	assert.deepEqual(
+		await decodeSnapshot(await encodeSnapshot(selected)),
+		selected,
+	);
 
 	const malformed = {
 		...snapshot([]),
@@ -24,7 +30,11 @@ test("snapshot codec preserves portable selection intent and rejects malformed p
 test("snapshot decoding bounds decompressed output and honors cancellation", async () => {
 	const encoded = gzipSync(
 		Buffer.from(
-			JSON.stringify(snapshot([{ path: "settings.json", content: Buffer.from("x".repeat(4096)) }])),
+			JSON.stringify(
+				snapshot([
+					{ path: "settings.json", content: Buffer.from("x".repeat(4096)) },
+				]),
+			),
 		),
 	);
 	await assert.rejects(

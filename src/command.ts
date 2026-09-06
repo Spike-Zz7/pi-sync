@@ -7,7 +7,11 @@ const YES_FLAG_COMPLETIONS: readonly CommandArgumentCompletion[] = [
 ];
 export const SYNC_COMMANDS = [
 	{ name: "help", description: "Show command usage" },
-	{ name: "use", description: "Switch the current sync setup", usageSuffix: " <setup>" },
+	{
+		name: "use",
+		description: "Switch the current sync setup",
+		usageSuffix: " <setup>",
+	},
 	{ name: "init", description: "Create local config template" },
 	{ name: "config", description: "Show resolved configuration" },
 	{ name: "files", description: "Choose included content" },
@@ -18,27 +22,43 @@ export const SYNC_COMMANDS = [
 	{ name: "pull", description: "Apply remote settings" },
 	{ name: "sync", description: "Push or pull as needed" },
 	{ name: "history", description: "Show recent remote snapshots" },
-	{ name: "rollback", description: "Apply a previous snapshot", usageSuffix: " <snapshot>" },
+	{
+		name: "rollback",
+		description: "Apply a previous snapshot",
+		usageSuffix: " <snapshot>",
+	},
 	{ name: "migrate-state", description: "Move legacy state into pi-sync/" },
-	{ name: "unlock", description: "Remove a stale local lock", usageSuffix: " --stale" },
+	{
+		name: "unlock",
+		description: "Remove a stale local lock",
+		usageSuffix: " --stale",
+	},
 ] as const;
 
 export type SyncCommandName = (typeof SYNC_COMMANDS)[number]["name"];
 
-const SYNC_COMMAND_COMPLETIONS: readonly CommandArgumentCompletion[] = SYNC_COMMANDS.map(
-	({ name, description }) => ({ value: name, label: name, description }),
-);
+const SYNC_COMMAND_COMPLETIONS: readonly CommandArgumentCompletion[] =
+	SYNC_COMMANDS.map(({ name, description }) => ({
+		value: name,
+		label: name,
+		description,
+	}));
 let setupCompletionNames: string[] = [];
 
 export function setSyncSetupCompletions(names: readonly string[]) {
-	setupCompletionNames = [...new Set(names)].sort((left, right) => left.localeCompare(right));
+	setupCompletionNames = [...new Set(names)].sort((left, right) =>
+		left.localeCompare(right),
+	);
 }
 const SETUP_FLAG_COMPLETION = {
 	value: "--setup",
 	label: "--setup",
 	description: "Address a sync setup without switching",
 } as const;
-const SYNC_FLAG_COMPLETIONS: Record<string, readonly CommandArgumentCompletion[]> = {
+const SYNC_FLAG_COMPLETIONS: Record<
+	string,
+	readonly CommandArgumentCompletion[]
+> = {
 	config: [SETUP_FLAG_COMPLETION],
 	files: [SETUP_FLAG_COMPLETION],
 	status: [SETUP_FLAG_COMPLETION],
@@ -46,29 +66,48 @@ const SYNC_FLAG_COMPLETIONS: Record<string, readonly CommandArgumentCompletion[]
 	doctor: [SETUP_FLAG_COMPLETION],
 	push: [
 		...YES_FLAG_COMPLETIONS,
-		{ value: "--force", label: "--force", description: "Overwrite visible remote changes" },
+		{
+			value: "--force",
+			label: "--force",
+			description: "Overwrite visible remote changes",
+		},
 		SETUP_FLAG_COMPLETION,
 	],
 	pull: [
 		...YES_FLAG_COMPLETIONS,
-		{ value: "--force", label: "--force", description: "Overwrite local changes" },
+		{
+			value: "--force",
+			label: "--force",
+			description: "Overwrite local changes",
+		},
 		SETUP_FLAG_COMPLETION,
 	],
 	sync: [
 		...YES_FLAG_COMPLETIONS,
-		{ value: "--force", label: "--force", description: "Resolve conflicts by forcing action" },
+		{
+			value: "--force",
+			label: "--force",
+			description: "Resolve conflicts by forcing action",
+		},
 		SETUP_FLAG_COMPLETION,
 	],
 	history: [SETUP_FLAG_COMPLETION],
 	rollback: [...YES_FLAG_COMPLETIONS, SETUP_FLAG_COMPLETION],
 	"migrate-state": YES_FLAG_COMPLETIONS,
-	unlock: [{ value: "--stale", label: "--stale", description: "Remove only a stale lock" }],
+	unlock: [
+		{
+			value: "--stale",
+			label: "--stale",
+			description: "Remove only a stale lock",
+		},
+	],
 };
 
 export function splitArgs(input: string) {
 	return (
-		input.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((arg) => arg.replace(/^['"]|['"]$/g, "")) ??
-		[]
+		input
+			.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)
+			?.map((arg) => arg.replace(/^['"]|['"]$/g, "")) ?? []
 	);
 }
 
@@ -85,8 +124,10 @@ export function parseOptions(args: string[]): CommandOptions {
 		else if (arg === "--stale") stale = true;
 		else if (arg === "--setup") {
 			const name = args[index + 1];
-			if (!name || name.startsWith("-")) throw new Error("--setup requires a sync setup name.");
-			if (setup !== undefined) throw new Error("--setup may be provided only once.");
+			if (!name || name.startsWith("-"))
+				throw new Error("--setup requires a sync setup name.");
+			if (setup !== undefined)
+				throw new Error("--setup may be provided only once.");
 			setup = name;
 			index += 1;
 		} else if (arg.startsWith("-")) {
@@ -105,7 +146,10 @@ export function parseOptions(args: string[]): CommandOptions {
 	};
 }
 
-export function validateCommandOptions(command: string, options: CommandOptions) {
+export function validateCommandOptions(
+	command: string,
+	options: CommandOptions,
+) {
 	const setupAllowed = new Set([
 		"config",
 		"files",
@@ -121,11 +165,21 @@ export function validateCommandOptions(command: string, options: CommandOptions)
 	if (options.setup && !setupAllowed.has(command)) {
 		throw new Error(`--setup is not supported by /sync ${command}.`);
 	}
-	if (options.yes && !["push", "pull", "sync", "rollback", "migrate-state"].includes(command)) {
-		throw new Error(`Confirmation/force options are not supported by /sync ${command}.`);
+	if (
+		options.yes &&
+		!["push", "pull", "sync", "rollback", "migrate-state"].includes(command)
+	) {
+		throw new Error(
+			`Confirmation/force options are not supported by /sync ${command}.`,
+		);
 	}
-	if (options.force && !["push", "pull", "sync", "rollback"].includes(command)) {
-		throw new Error(`Confirmation/force options are not supported by /sync ${command}.`);
+	if (
+		options.force &&
+		!["push", "pull", "sync", "rollback"].includes(command)
+	) {
+		throw new Error(
+			`Confirmation/force options are not supported by /sync ${command}.`,
+		);
 	}
 	if (options.stale && command !== "unlock") {
 		throw new Error(`--stale is not supported by /sync ${command}.`);
@@ -133,13 +187,19 @@ export function validateCommandOptions(command: string, options: CommandOptions)
 	const expectedValues = command === "rollback" || command === "use" ? 1 : 0;
 	if (options.args.length !== expectedValues) {
 		if (command === "rollback")
-			throw new Error("Usage: /sync rollback <snapshot-id> [--yes] [--setup <name>]");
+			throw new Error(
+				"Usage: /sync rollback <snapshot-id> [--yes] [--setup <name>]",
+			);
 		if (command === "use") throw new Error("Usage: /sync use <setup>");
-		throw new Error(`Unexpected argument for /sync ${command}: ${options.args.join(" ")}`);
+		throw new Error(
+			`Unexpected argument for /sync ${command}: ${options.args.join(" ")}`,
+		);
 	}
 }
 
-export function completeSyncArguments(argumentPrefix: string): CommandArgumentCompletion[] | null {
+export function completeSyncArguments(
+	argumentPrefix: string,
+): CommandArgumentCompletion[] | null {
 	const prefix = argumentPrefix.trimStart();
 	if (prefix === "") return [...SYNC_COMMAND_COMPLETIONS];
 
@@ -149,7 +209,9 @@ export function completeSyncArguments(argumentPrefix: string): CommandArgumentCo
 
 	const [command] = tokens;
 	if (tokens.length === 1 && !trailingSpace) {
-		const matches = SYNC_COMMAND_COMPLETIONS.filter((item) => item.value.startsWith(command));
+		const matches = SYNC_COMMAND_COMPLETIONS.filter((item) =>
+			item.value.startsWith(command),
+		);
 		return matches.length > 0 ? [...matches] : null;
 	}
 
@@ -159,9 +221,13 @@ export function completeSyncArguments(argumentPrefix: string): CommandArgumentCo
 		return completeSetupValue(prefix, trailingSpace ? "" : (args[0] ?? ""));
 	}
 	const setupFlagIndex = args.lastIndexOf("--setup");
-	if (setupFlagIndex >= 0 && setupFlagIndex === args.length - (trailingSpace ? 1 : 2)) {
+	if (
+		setupFlagIndex >= 0 &&
+		setupFlagIndex === args.length - (trailingSpace ? 1 : 2)
+	) {
 		const currentSetup = trailingSpace ? "" : (args.at(-1) ?? "");
-		if (!currentSetup.startsWith("-")) return completeSetupValue(prefix, currentSetup);
+		if (!currentSetup.startsWith("-"))
+			return completeSetupValue(prefix, currentSetup);
 	}
 
 	const flagCompletions = SYNC_FLAG_COMPLETIONS[command];
@@ -169,7 +235,11 @@ export function completeSyncArguments(argumentPrefix: string): CommandArgumentCo
 
 	const completedArgs = trailingSpace ? args : args.slice(0, -1);
 	const completedValues = completedArgs.filter((arg) => !arg.startsWith("-"));
-	if (command === "rollback" ? completedValues.length > 1 : completedValues.length > 0) {
+	if (
+		command === "rollback"
+			? completedValues.length > 1
+			: completedValues.length > 0
+	) {
 		return null;
 	}
 
@@ -180,16 +250,28 @@ export function completeSyncArguments(argumentPrefix: string): CommandArgumentCo
 	const completionPrefix = trailingSpace
 		? prefix
 		: prefix.slice(0, prefix.length - currentRaw.length);
-	const matches = flagCompletions.filter((item) => item.value.startsWith(current));
+	const completedFlags = new Set(
+		completedArgs.filter((arg) => arg.startsWith("-")),
+	);
+	const matches = flagCompletions.filter(
+		(item) => !completedFlags.has(item.value) && item.value.startsWith(current),
+	);
 	return matches.length > 0
-		? matches.map((item) => ({ ...item, value: `${completionPrefix}${item.value}` }))
+		? matches.map((item) => ({
+				...item,
+				value: `${completionPrefix}${item.value}`,
+			}))
 		: null;
 }
 
 function completeSetupValue(prefix: string, current: string) {
 	const currentRaw = current ? (prefix.match(/\S+$/u)?.[0] ?? "") : "";
-	const completionPrefix = currentRaw ? prefix.slice(0, prefix.length - currentRaw.length) : prefix;
-	const matches = setupCompletionNames.filter((name) => name.startsWith(current));
+	const completionPrefix = currentRaw
+		? prefix.slice(0, prefix.length - currentRaw.length)
+		: prefix;
+	const matches = setupCompletionNames.filter((name) =>
+		name.startsWith(current),
+	);
 	return matches.length > 0
 		? matches.map((name) => ({
 				value: `${completionPrefix}${name}`,
@@ -200,14 +282,23 @@ function completeSetupValue(prefix: string, current: string) {
 }
 
 export function syncMenuOptions() {
-	return SYNC_COMMANDS.map(({ name, description }) => `${name} — ${description}`);
+	return SYNC_COMMANDS.map(
+		({ name, description }) => `${name} — ${description}`,
+	);
 }
 
-export function syncCommandFromMenuOption(option: string): SyncCommandName | undefined {
-	return SYNC_COMMANDS.find(({ name, description }) => option === `${name} — ${description}`)?.name;
+export function syncCommandFromMenuOption(
+	option: string,
+): SyncCommandName | undefined {
+	return SYNC_COMMANDS.find(
+		({ name, description }) => option === `${name} — ${description}`,
+	)?.name;
 }
 
-export async function resolveSyncCommand(input: string, ctx: ExtensionCommandContext) {
+export async function resolveSyncCommand(
+	input: string,
+	ctx: ExtensionCommandContext,
+) {
 	const [subcommand, ...rest] = splitArgs(input);
 	if (subcommand) return { subcommand, rest };
 	if (!ctx.hasUI) {
@@ -216,11 +307,15 @@ export async function resolveSyncCommand(input: string, ctx: ExtensionCommandCon
 	}
 
 	const selectedOption = await ctx.ui.select("pi-sync", syncMenuOptions());
-	const selected = selectedOption ? syncCommandFromMenuOption(selectedOption) : undefined;
+	const selected = selectedOption
+		? syncCommandFromMenuOption(selectedOption)
+		: undefined;
 	if (!selected) return undefined;
 	if (selected !== "rollback") return { subcommand: selected, rest: [] };
 
-	const target = (await ctx.ui.input("Rollback snapshot", "snapshot id"))?.trim();
+	const target = (
+		await ctx.ui.input("Rollback snapshot", "snapshot id")
+	)?.trim();
 	if (!target) {
 		ctx.ui.notify("Rollback cancelled.", "info");
 		return undefined;
@@ -230,7 +325,8 @@ export async function resolveSyncCommand(input: string, ctx: ExtensionCommandCon
 
 export function usage() {
 	const commands = SYNC_COMMANDS.map(
-		(command) => `${command.name}${"usageSuffix" in command ? command.usageSuffix : ""}`,
+		(command) =>
+			`${command.name}${"usageSuffix" in command ? command.usageSuffix : ""}`,
 	).join(", ");
 	return [
 		"Usage: /sync <command>",

@@ -1,11 +1,37 @@
 import { randomUUID } from "node:crypto";
+import {
+	mkdir,
+	mkdirSync,
+	realpath,
+	realpathSync,
+	rmdir,
+	rmdirSync,
+	stat,
+	statSync,
+	utimes,
+	utimesSync,
+} from "node:fs";
 import fs from "node:fs/promises";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
 import { ensureStateDir, lockPath } from "./config.js";
-import { LOCK_GUARD_STALE_MS, LOCK_GUARD_UPDATE_MS } from "./lock-policy.js";
-import { LOCKFILE_FS_ADAPTER } from "./lockfile-fs.js";
 import type { CommandOptions, LockFile } from "./types.js";
+
+export const LOCK_GUARD_STALE_MS = 30_000;
+export const LOCK_GUARD_UPDATE_MS = 10_000;
+
+export const LOCKFILE_FS_ADAPTER = {
+	mkdir,
+	mkdirSync,
+	realpath,
+	realpathSync,
+	rmdir,
+	rmdirSync,
+	stat,
+	statSync,
+	utimes,
+	utimesSync,
+};
 
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const MAX_PROCESS_ID = 2_147_483_647;
@@ -59,7 +85,9 @@ export async function withLock<T>(
 				rechecked.lock.id !== inspection.lock.id ||
 				!isStaleLock(rechecked.lock)
 			) {
-				throw new Error("pi-sync lock changed while preparing transaction recovery; retry.");
+				throw new Error(
+					"pi-sync lock changed while preparing transaction recovery; retry.",
+				);
 			}
 			await fs.rm(lockPath(), { force: true });
 			inspection = { status: "missing" };
@@ -75,7 +103,9 @@ export async function withLock<T>(
 			);
 		}
 
-		await fs.writeFile(lockPath(), JSON.stringify(lock, null, "\t"), { flag: "wx" });
+		await fs.writeFile(lockPath(), JSON.stringify(lock, null, "\t"), {
+			flag: "wx",
+		});
 		guard.throwIfCompromised();
 		result = await fn();
 		guard.throwIfCompromised();
@@ -109,9 +139,12 @@ export async function inspectLock(): Promise<LockInspection> {
 		const text = await fs.readFile(lockPath(), "utf8");
 		if (text.trim().length === 0) return { status: "unreadable" };
 		const parsed = JSON.parse(text) as unknown;
-		return isLockFile(parsed) ? { status: "valid", lock: parsed } : { status: "unreadable" };
+		return isLockFile(parsed)
+			? { status: "valid", lock: parsed }
+			: { status: "unreadable" };
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { status: "missing" };
+		if ((error as NodeJS.ErrnoException).code === "ENOENT")
+			return { status: "missing" };
 		if (error instanceof SyntaxError) return { status: "unreadable" };
 		throw error;
 	}
@@ -142,16 +175,19 @@ export function isLockGuardHeld() {
 }
 
 export function isStaleLock(lock: LockFile) {
+	if (Date.now() - Date.parse(lock.startedAt) > LOCK_STALE_MS) return true;
 	try {
 		process.kill(lock.pid, 0);
 		return false;
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
-		return Date.now() - Date.parse(lock.startedAt) > LOCK_STALE_MS;
+		return (error as NodeJS.ErrnoException).code === "ESRCH";
 	}
 }
 
-export async function unlock(ctx: ExtensionCommandContext, options: CommandOptions) {
+export async function unlock(
+	ctx: ExtensionCommandContext,
+	options: CommandOptions,
+) {
 	throwIfAborted(options.signal);
 	await ensureStateDir();
 	throwIfAborted(options.signal);
@@ -180,7 +216,10 @@ export async function unlock(ctx: ExtensionCommandContext, options: CommandOptio
 	if (failed) throw failure;
 }
 
-async function unlockGuarded(ctx: ExtensionCommandContext, options: CommandOptions) {
+async function unlockGuarded(
+	ctx: ExtensionCommandContext,
+	options: CommandOptions,
+) {
 	throwIfAborted(options.signal);
 	let inspection = await inspectLock();
 	throwIfAborted(options.signal);
@@ -218,7 +257,10 @@ async function unlockGuarded(ctx: ExtensionCommandContext, options: CommandOptio
 		}
 	}
 	if (!isStaleLock(inspection.lock)) {
-		ctx.ui.notify("Lock owner is still live; refusing to remove it.", "warning");
+		ctx.ui.notify(
+			"Lock owner is still live; refusing to remove it.",
+			"warning",
+		);
 		return;
 	}
 	throwIfAborted(options.signal);
@@ -271,7 +313,9 @@ async function acquireGuard(): Promise<Guard> {
 async function describeHeldLock() {
 	const current = await readLock();
 	if (current && isStaleLock(current)) {
-		return new Error("pi-sync lock owner exited; retry shortly while the lock guard expires.");
+		return new Error(
+			"pi-sync lock owner exited; retry shortly while the lock guard expires.",
+		);
 	}
 	if (current) {
 		return new Error(

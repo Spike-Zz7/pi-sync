@@ -4,7 +4,9 @@ import { shouldRefreshSyncedState } from "../src/sync-state.js";
 import { requiredConfig, snapshot } from "./helpers.js";
 
 test("matching legacy state backfills an opaque remote revision on no-op sync", () => {
-	const remote = snapshot([{ path: "settings.json", content: Buffer.from("same") }]);
+	const remote = snapshot([
+		{ path: "settings.json", content: Buffer.from("same") },
+	]);
 	const head = {
 		snapshotRef: remote.id,
 		snapshotId: remote.id,
@@ -24,11 +26,16 @@ test("matching legacy state backfills an opaque remote revision on no-op sync", 
 		version: 1,
 		profile: "default",
 		lastAppliedSnapshot: remote.id,
-		lastFileHashes: Object.fromEntries(remote.files.map((file) => [file.path, file.sha256])),
+		lastFileHashes: Object.fromEntries(
+			remote.files.map((file) => [file.path, file.sha256]),
+		),
 	};
 	const sameRevision = (left: string, right: string) => left === right;
 
-	assert.equal(shouldRefreshSyncedState(remote, head, state, config, sameRevision), true);
+	assert.equal(
+		shouldRefreshSyncedState(remote, head, state, config, sameRevision),
+		true,
+	);
 	assert.equal(
 		shouldRefreshSyncedState(
 			remote,

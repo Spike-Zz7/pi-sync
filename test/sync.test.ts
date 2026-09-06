@@ -26,16 +26,22 @@ import {
 	updateLocalConfig,
 } from "../src/config.js";
 import { showFileSelection } from "../src/file-selection.js";
+import { isDeniedPath } from "../src/paths.js";
 import { withStateDirectoryAccess } from "../src/state-directory.js";
 import sync from "../src/sync.js";
 import { syncBoth } from "../src/sync-operations.js";
-import { BUILT_IN_SYNC_ROOTS, RemoteSelectionMismatchError } from "../src/sync-policy.js";
-import { v3S3Settings, withTempHome } from "./helpers.js";
+import {
+	BUILT_IN_SYNC_ROOTS,
+	RemoteSelectionMismatchError,
+} from "../src/sync-policy.js";
+import { v3GitSettings, withTempHome } from "./helpers.js";
 
 initTheme("dark", false);
 
 function selectedMultiSelectLabel(lines: readonly string[]) {
-	const line = lines.find((candidate) => candidate.startsWith("→ ") || candidate.startsWith("› "));
+	const line = lines.find(
+		(candidate) => candidate.startsWith("→ ") || candidate.startsWith("› "),
+	);
 	return line
 		?.slice(2)
 		.replace(/^\[(?:x| |-)\]\s+/u, "")
@@ -48,7 +54,10 @@ test("sync command catalog and usage document setup-addressing routes", () => {
 	assert.match(usage(), /use <setup>/u);
 	assert.match(usage(), /Version 1 and version 2 settings are unsupported/u);
 	assert.doesNotMatch(usage(), /`profiles`|`targets`|--target/u);
-	const readme = readFileSync(`${process.cwd()}/packages/pi-sync/README.md`, "utf8");
+	const readmePath = existsSync(`${process.cwd()}/packages/pi-sync/README.md`)
+		? `${process.cwd()}/packages/pi-sync/README.md`
+		: `${process.cwd()}/README.md`;
+	const readme = readFileSync(readmePath, "utf8");
 	for (const command of SYNC_COMMANDS) {
 		assert.match(readme, new RegExp(`\\/sync ${command.name}\\b`, "u"));
 	}
@@ -68,13 +77,18 @@ test("--setup is canonical and --target is rejected by the breaking version 3 ro
 		setup: "work",
 		args: [],
 	});
-	assert.throws(() => parseOptions(["--target", "work"]), /Unknown sync option: --target/u);
+	assert.throws(
+		() => parseOptions(["--target", "work"]),
+		/Unknown sync option: --target/u,
+	);
 	assert.throws(() => parseOptions(["--setup"]), /requires a sync setup name/u);
 	assert.throws(
 		() => validateCommandOptions("help", parseOptions(["--setup", "work"])),
 		/not supported/u,
 	);
-	assert.doesNotThrow(() => validateCommandOptions("migrate-state", parseOptions(["--yes"])));
+	assert.doesNotThrow(() =>
+		validateCommandOptions("migrate-state", parseOptions(["--yes"])),
+	);
 	assert.throws(
 		() => validateCommandOptions("migrate-state", parseOptions(["--force"])),
 		/not supported/u,
@@ -84,18 +98,26 @@ test("--setup is canonical and --target is rejected by the breaking version 3 ro
 test("argument completion retains prior tokens and completes known setup names", () => {
 	setSyncSetupCompletions(["home", "work"]);
 	assert.ok(completeSyncArguments("")?.some((item) => item.value === "status"));
-	assert.ok(completeSyncArguments("status --s")?.some((item) => item.value === "status --setup"));
 	assert.ok(
-		completeSyncArguments("status --setup w")?.some((item) => item.value === "status --setup work"),
+		completeSyncArguments("status --s")?.some(
+			(item) => item.value === "status --setup",
+		),
 	);
-	assert.ok(completeSyncArguments("use h")?.some((item) => item.value === "use home"));
+	assert.ok(
+		completeSyncArguments("status --setup w")?.some(
+			(item) => item.value === "status --setup work",
+		),
+	);
+	assert.ok(
+		completeSyncArguments("use h")?.some((item) => item.value === "use home"),
+	);
 	assert.equal(completeSyncArguments("use home "), null);
 });
 
 test("extension registers command and separate startup/shutdown cancellation boundaries", () => {
 	const mock = createMockPi();
 	sync(mock.pi);
-	assert.equal(mock.commands.get("sync")?.description?.includes("storage"), true);
+	assert.equal(mock.commands.get("sync")?.description?.includes("Git"), true);
 	assert.equal(mock.events.get("session_start")?.length, 1);
 	assert.equal(mock.events.get("session_shutdown")?.length, 1);
 });
@@ -111,7 +133,10 @@ test("session start leaves idle legacy state in place until migration is explici
 
 		await mock.events.get("session_start")?.[0]?.({}, ctx);
 
-		assert.equal(readFileSync(path.join(legacy, "default.state.json"), "utf8"), "state");
+		assert.equal(
+			readFileSync(path.join(legacy, "default.state.json"), "utf8"),
+			"state",
+		);
 		assert.equal(existsSync(path.join(agentDir, "pi-sync")), false);
 		assert.ok(
 			notifications.some((notification) =>
@@ -128,17 +153,25 @@ test("explicit migrate-state route moves legacy state after user acknowledgement
 		writeFileSync(path.join(legacy, "default.state.json"), "state");
 		const mock = createMockPi();
 		sync(mock.pi);
-		const { ctx, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
+		const { ctx, notifications } = createMockContext({
+			hasUI: true,
+			mode: "rpc",
+		});
 
 		await mock.commands.get("sync")?.handler("migrate-state --yes", ctx);
 
 		assert.equal(existsSync(legacy), false);
 		assert.equal(
-			readFileSync(path.join(agentDir, "pi-sync", "default.state.json"), "utf8"),
+			readFileSync(
+				path.join(agentDir, "pi-sync", "default.state.json"),
+				"utf8",
+			),
 			"state",
 		);
 		assert.ok(
-			notifications.some((notification) => /Migrated pi-sync state/u.test(notification.message)),
+			notifications.some((notification) =>
+				/Migrated pi-sync state/u.test(notification.message),
+			),
 		);
 	});
 });
@@ -157,10 +190,15 @@ test("migrate-state TUI cancellation leaves legacy state unchanged", async () =>
 
 		await mock.commands.get("sync")?.handler("migrate-state", ctx);
 
-		assert.equal(readFileSync(path.join(legacy, "default.state.json"), "utf8"), "state");
+		assert.equal(
+			readFileSync(path.join(legacy, "default.state.json"), "utf8"),
+			"state",
+		);
 		assert.equal(existsSync(path.join(agentDir, "pi-sync")), false);
 		assert.ok(
-			notifications.some((notification) => /migration cancelled/u.test(notification.message)),
+			notifications.some((notification) =>
+				/migration cancelled/u.test(notification.message),
+			),
 		);
 	});
 });
@@ -181,7 +219,10 @@ test("RPC init creates a valid empty version 3 document", async () => {
 		mkdirSync(agentDir, { recursive: true });
 		const mock = createMockPi();
 		sync(mock.pi);
-		const { ctx, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
+		const { ctx, notifications } = createMockContext({
+			hasUI: true,
+			mode: "rpc",
+		});
 		await mock.commands.get("sync")?.handler("init", ctx);
 		assert.deepEqual(await readLocalConfigObject(), {
 			version: 3,
@@ -209,7 +250,10 @@ test("direct selection mismatch reports exact differences and inline recovery gu
 					},
 				}) as never,
 		});
-		const { ctx, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
+		const { ctx, notifications } = createMockContext({
+			hasUI: true,
+			mode: "rpc",
+		});
 
 		await mock.commands.get("sync")?.handler("pull --setup home", ctx);
 
@@ -222,7 +266,9 @@ test("direct selection mismatch reports exact differences and inline recovery gu
 
 test("direct interactive selection mismatch opens recovery and cancellation preserves attention", async () => {
 	await withStateDirectory(async () => {
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		const config = await loadConfig("home");
 		const mock = createMockPi();
 		sync(mock.pi, {
@@ -245,7 +291,9 @@ test("direct interactive selection mismatch opens recovery and cancellation pres
 			custom: tui.custom,
 		});
 
-		const running = mock.commands.get("sync")?.handler("pull --setup home", ctx);
+		const running = mock.commands
+			.get("sync")
+			?.handler("pull --setup home", ctx);
 		await tui.waitForOpen();
 		assert.match(tui.render().join("\n"), /Synced content differs/u);
 		tui.press("tui.select.cancel");
@@ -260,7 +308,9 @@ test("direct interactive selection mismatch opens recovery and cancellation pres
 test("direct interactive local-wins recovery clears attention after reviewed publication", async () => {
 	await withStateDirectory(async () => {
 		mkdirSync(path.dirname(localConfigPath()), { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		const config = await loadConfig("home");
 		let pushes = 0;
 		const mock = createMockPi();
@@ -275,7 +325,10 @@ test("direct interactive local-wins recovery clears attention after reviewed pub
 							syncConfigReviewFingerprint(config),
 						);
 					},
-					push: async (_ctx: unknown, options: { force?: boolean; yes?: boolean }) => {
+					push: async (
+						_ctx: unknown,
+						options: { force?: boolean; yes?: boolean },
+					) => {
 						assert.equal(options.force, true);
 						assert.equal(options.yes, false);
 						pushes += 1;
@@ -290,7 +343,9 @@ test("direct interactive local-wins recovery clears attention after reviewed pub
 			custom: tui.custom,
 		});
 
-		const running = mock.commands.get("sync")?.handler("pull --setup home", ctx);
+		const running = mock.commands
+			.get("sync")
+			?.handler("pull --setup home", ctx);
 		await tui.waitForOpen();
 		tui.press("tui.select.down");
 		tui.press("tui.select.down");
@@ -305,7 +360,9 @@ test("direct interactive local-wins recovery clears attention after reviewed pub
 
 test("direct TUI --yes mismatch remains non-interactive but publishes attention", async () => {
 	await withStateDirectory(async () => {
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		const config = await loadConfig("home");
 		const mock = createMockPi();
 		sync(mock.pi, {
@@ -334,14 +391,19 @@ test("direct TUI --yes mismatch remains non-interactive but publishes attention"
 		await mock.commands.get("sync")?.handler("pull --yes --setup home", ctx);
 
 		assert.equal(customCalls, 0);
-		assert.match(notifications.at(-1)?.message ?? "", /Remote-only: models\.json/u);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/Remote-only: models\.json/u,
+		);
 		assert.match(statuses.get("sync") ?? "", /review needed/u);
 	});
 });
 
 test("a successful deterministic force push clears matching attention", async () => {
 	await withStateDirectory(async () => {
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		const config = await loadConfig("home");
 		const mock = createMockPi();
 		sync(mock.pi, {
@@ -358,11 +420,16 @@ test("a successful deterministic force push clears matching attention", async ()
 					push: async () => "applied",
 				}) as never,
 		});
-		const { ctx, statuses, widgets } = createMockContext({ hasUI: true, mode: "tui" });
+		const { ctx, statuses, widgets } = createMockContext({
+			hasUI: true,
+			mode: "tui",
+		});
 		await mock.commands.get("sync")?.handler("pull --yes --setup home", ctx);
 		assert.match(statuses.get("sync") ?? "", /review needed/u);
 
-		await mock.commands.get("sync")?.handler("push --force --yes --setup home", ctx);
+		await mock.commands
+			.get("sync")
+			?.handler("push --force --yes --setup home", ctx);
 
 		assert.equal(statuses.get("sync"), undefined);
 		assert.equal(widgets.get("sync:attention"), undefined);
@@ -371,7 +438,9 @@ test("a successful deterministic force push clears matching attention", async ()
 
 test("a later direct command clears attention invalidated by local setup changes", async () => {
 	await withStateDirectory(async () => {
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		const config = await loadConfig("home");
 		const mock = createMockPi();
 		sync(mock.pi, {
@@ -387,7 +456,10 @@ test("a later direct command clears attention invalidated by local setup changes
 					},
 				}) as never,
 		});
-		const { ctx, statuses, widgets } = createMockContext({ hasUI: true, mode: "tui" });
+		const { ctx, statuses, widgets } = createMockContext({
+			hasUI: true,
+			mode: "tui",
+		});
 		await mock.commands.get("sync")?.handler("pull --yes --setup home", ctx);
 		assert.match(statuses.get("sync") ?? "", /review needed/u);
 		await updateLocalConfig((settings) => ({
@@ -423,7 +495,10 @@ test("direct order-only mismatch explains both ordered lists", async () => {
 					},
 				}) as never,
 		});
-		const { ctx, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
+		const { ctx, notifications } = createMockContext({
+			hasUI: true,
+			mode: "rpc",
+		});
 
 		await mock.commands.get("sync")?.handler("push --setup home", ctx);
 
@@ -445,19 +520,30 @@ test("generic operation failures never expose selection resolution actions", asy
 					},
 				}) as never,
 		});
-		const { ctx, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
+		const { ctx, notifications } = createMockContext({
+			hasUI: true,
+			mode: "rpc",
+		});
 
 		await mock.commands.get("sync")?.handler("pull --setup home", ctx);
 
-		assert.match(notifications.at(-1)?.message ?? "", /transport authentication failed/u);
-		assert.doesNotMatch(notifications.at(-1)?.message ?? "", /content list|update remote/iu);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/transport authentication failed/u,
+		);
+		assert.doesNotMatch(
+			notifications.at(-1)?.message ?? "",
+			/content list|update remote/iu,
+		);
 	});
 });
 
 test("the command boundary sends only typed selection mismatches to the manager resolver", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		let releaseOperation: () => void = () => undefined;
 		const operationGate = new Promise<void>((resolve) => {
 			releaseOperation = resolve;
@@ -504,7 +590,7 @@ test("automatic selection mismatch offers immediate TUI recovery and Later prese
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
 		const before = Buffer.from(
-			`${JSON.stringify(v3S3Settings({ automatic: true, include: ["settings.json", "sessions"] }))}\n`,
+			`${JSON.stringify(v3GitSettings({ automatic: true, include: ["settings.json", "sessions"] }))}\n`,
 		);
 		writeFileSync(localConfigPath(), before, { mode: 0o600 });
 		mkdirSync(path.join(agentDir, "sessions"), { recursive: true });
@@ -549,7 +635,10 @@ test("automatic selection mismatch offers immediate TUI recovery and Later prese
 
 		const manager = mock.commands.get("sync")?.handler("", ctx);
 		await tui.waitForOpen();
-		assert.match(tui.render().join("\n"), /Review synced content \(recommended\)/u);
+		assert.match(
+			tui.render().join("\n"),
+			/Review synced content \(recommended\)/u,
+		);
 		tui.press("ctrl+c");
 		await manager;
 
@@ -562,10 +651,19 @@ test("automatic selection mismatch offers immediate TUI recovery and Later prese
 				return undefined;
 			},
 		});
-		await mock.events.get("session_shutdown")?.[0]?.({ reason: "exit" }, shutdown.ctx);
+		await mock.events.get("session_shutdown")?.[0]?.(
+			{ reason: "exit" },
+			shutdown.ctx,
+		);
 		assert.equal(shutdownCustomCalls, 0);
-		assert.match(shutdown.notifications.at(-1)?.message ?? "", /session push skipped/u);
-		assert.match(shutdown.notifications.at(-1)?.message ?? "", /Remote-only: pi-starship\.toml/u);
+		assert.match(
+			shutdown.notifications.at(-1)?.message ?? "",
+			/session push skipped/u,
+		);
+		assert.match(
+			shutdown.notifications.at(-1)?.message ?? "",
+			/Remote-only: pi-starship\.toml/u,
+		);
 		assert.equal(shutdown.widgets.get("sync:attention"), undefined);
 		assert.equal(shutdown.statuses.get("sync"), undefined);
 
@@ -584,9 +682,13 @@ test("automatic selection mismatch offers immediate TUI recovery and Later prese
 test("session replacement aborts startup attention without stale presentation", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings({ automatic: true })), {
-			mode: 0o600,
-		});
+		writeFileSync(
+			localConfigPath(),
+			JSON.stringify(v3GitSettings({ automatic: true })),
+			{
+				mode: 0o600,
+			},
+		);
 		const config = await loadConfig("home");
 		let syncCalls = 0;
 		const mock = createMockPi();
@@ -607,7 +709,11 @@ test("session replacement aborts startup attention without stale presentation", 
 				}) as never,
 		});
 		const tui = createTuiHarness({ width: 60, rows: 18 });
-		const first = createMockContext({ hasUI: true, mode: "tui", custom: tui.custom });
+		const first = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			custom: tui.custom,
+		});
 		const firstStart = mock.events.get("session_start")?.[0]?.({}, first.ctx);
 		await tui.waitForOpen();
 		let replacementCustomCalls = 0;
@@ -633,9 +739,13 @@ test("session replacement aborts startup attention without stale presentation", 
 test("automatic RPC selection mismatch remains read-only and observable", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings({ automatic: true })), {
-			mode: 0o600,
-		});
+		writeFileSync(
+			localConfigPath(),
+			JSON.stringify(v3GitSettings({ automatic: true })),
+			{
+				mode: 0o600,
+			},
+		);
 		const config = await loadConfig("home");
 		const mock = createMockPi();
 		sync(mock.pi, {
@@ -651,22 +761,38 @@ test("automatic RPC selection mismatch remains read-only and observable", async 
 					},
 				}) as never,
 		});
-		const { ctx, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
+		const { ctx, notifications } = createMockContext({
+			hasUI: true,
+			mode: "rpc",
+		});
 
 		await mock.events.get("session_start")?.[0]?.({}, ctx);
 
-		assert.match(notifications.at(-1)?.message ?? "", /pi-sync auto sync skipped/u);
-		assert.match(notifications.at(-1)?.message ?? "", /Remote-only: models\.json/u);
-		assert.match(notifications.at(-1)?.message ?? "", /RPC review is read-only/u);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/pi-sync auto sync skipped/u,
+		);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/Remote-only: models\.json/u,
+		);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/RPC review is read-only/u,
+		);
 	});
 });
 
 test("generic automatic failure remains notification-only", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings({ automatic: true })), {
-			mode: 0o600,
-		});
+		writeFileSync(
+			localConfigPath(),
+			JSON.stringify(v3GitSettings({ automatic: true })),
+			{
+				mode: 0o600,
+			},
+		);
 		const mock = createMockPi();
 		sync(mock.pi, {
 			loadSyncOperations: async () =>
@@ -697,11 +823,19 @@ test("generic automatic failure remains notification-only", async () => {
 test("included-content route has a protocol-safe RPC summary", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
-		const { ctx, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
+		const { ctx, notifications } = createMockContext({
+			hasUI: true,
+			mode: "rpc",
+		});
 		await showFileSelection(ctx, "home");
 		assert.match(notifications.at(-1)?.message ?? "", /sync setup home/u);
-		assert.match(notifications.at(-1)?.message ?? "", /include: settings.json/u);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/include: settings.json/u,
+		);
 		assert.match(notifications.at(-1)?.message ?? "", /sync\.include/u);
 	});
 });
@@ -709,7 +843,9 @@ test("included-content route has a protocol-safe RPC summary", async () => {
 test("included-content TUI renders textual state at narrow and wide widths", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		const rendered = new Map<number, string[]>();
 		const { ctx } = createMockContext({
 			hasUI: true,
@@ -733,7 +869,7 @@ test("included-content TUI renders textual state at narrow and wide widths", asy
 	});
 });
 
-test("included-content TUI lists built-in and custom paths exactly once", async () => {
+test("included-content TUI lists primary categories and configured custom paths exactly once", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
 		for (const root of BUILT_IN_SYNC_ROOTS) {
@@ -742,7 +878,9 @@ test("included-content TUI lists built-in and custom paths exactly once", async 
 			else mkdirSync(target);
 		}
 		writeFileSync(path.join(agentDir, "custom.json"), "{}\n");
-		const before = Buffer.from(`${JSON.stringify(v3S3Settings())}\n`);
+		const before = Buffer.from(
+			`${JSON.stringify(v3GitSettings({ include: ["settings.json", "custom.json"] }))}\n`,
+		);
 		writeFileSync(localConfigPath(), before, { mode: 0o600 });
 		let customCalls = 0;
 		const labels: string[] = [];
@@ -765,9 +903,11 @@ test("included-content TUI lists built-in and custom paths exactly once", async 
 		await showFileSelection(ctx, "home");
 		assert.equal(customCalls, 1);
 		assert.deepEqual(labels, [
-			...BUILT_IN_SYNC_ROOTS,
+			"Preferences",
+			"Instructions & prompts",
+			"Skills",
+			"Usage records",
 			"custom.json",
-			"sessions",
 			"Add custom path…",
 		]);
 		assert.deepEqual(readFileSync(localConfigPath()), before);
@@ -777,7 +917,9 @@ test("included-content TUI lists built-in and custom paths exactly once", async 
 test("included-content TUI adds and saves a custom path that is absent locally", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		const remoteOnlyPath = "remote-only.toml";
 		let screen = 0;
 		const { ctx, notifications } = createMockContext({
@@ -789,10 +931,16 @@ test("included-content TUI adds and saves a custom path that is absent locally",
 				const harness = createCustomSelectorHarness(factory, 100);
 				if (screen === 1) {
 					for (let index = 0; index < 32; index += 1) {
-						if (selectedMultiSelectLabel(harness.render()) === "Add custom path…") break;
+						if (
+							selectedMultiSelectLabel(harness.render()) === "Add custom path…"
+						)
+							break;
 						harness.handleInput("tui.select.down");
 					}
-					assert.equal(selectedMultiSelectLabel(harness.render()), "Add custom path…");
+					assert.equal(
+						selectedMultiSelectLabel(harness.render()),
+						"Add custom path…",
+					);
 					harness.handleInput("tui.select.confirm");
 					await Promise.resolve();
 				} else if (screen === 2) {
@@ -809,18 +957,21 @@ test("included-content TUI adds and saves a custom path that is absent locally",
 
 		assert.equal(screen, 3);
 		assert.equal(existsSync(path.join(agentDir, remoteOnlyPath)), false);
-		assert.deepEqual((await readLocalConfigObject())?.syncSetups.home.sync.include, [
-			"settings.json",
-			remoteOnlyPath,
-		]);
-		assert.match(notifications.at(-1)?.message ?? "", /Saved included content/u);
+		assert.deepEqual(
+			(await readLocalConfigObject())?.syncSetups.home.sync.include,
+			["settings.json", remoteOnlyPath],
+		);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/Saved included content/u,
+		);
 	});
 });
 
 test("included-content TUI rejects an unsafe absent custom path without changing settings", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const before = Buffer.from(`${JSON.stringify(v3S3Settings())}\n`);
+		const before = Buffer.from(`${JSON.stringify(v3GitSettings())}\n`);
 		writeFileSync(localConfigPath(), before, { mode: 0o600 });
 		let screen = 0;
 		const { ctx, notifications } = createMockContext({
@@ -831,10 +982,17 @@ test("included-content TUI rejects an unsafe absent custom path without changing
 				screen += 1;
 				const harness = createCustomSelectorHarness(factory, 100);
 				if (screen === 1) {
-					for (let index = 0; index < BUILT_IN_SYNC_ROOTS.length + 1; index += 1) {
+					for (let index = 0; index < 32; index += 1) {
+						if (
+							selectedMultiSelectLabel(harness.render()) === "Add custom path…"
+						)
+							break;
 						harness.handleInput("tui.select.down");
 					}
-					assert.equal(selectedMultiSelectLabel(harness.render()), "Add custom path…");
+					assert.equal(
+						selectedMultiSelectLabel(harness.render()),
+						"Add custom path…",
+					);
 					harness.handleInput("tui.select.confirm");
 					await Promise.resolve();
 				} else {
@@ -855,7 +1013,7 @@ test("included-content TUI rejects an unsafe absent custom path without changing
 test("included-content custom-path input stops on session replacement", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const before = Buffer.from(`${JSON.stringify(v3S3Settings())}\n`);
+		const before = Buffer.from(`${JSON.stringify(v3GitSettings())}\n`);
 		writeFileSync(localConfigPath(), before, { mode: 0o600 });
 		const controller = new AbortController();
 		let screen = 0;
@@ -869,10 +1027,15 @@ test("included-content custom-path input stops on session replacement", async ()
 			custom: async (factory: unknown) => {
 				screen += 1;
 				const harness = createCustomSelectorHarness(factory, 100);
-				for (let index = 0; index < BUILT_IN_SYNC_ROOTS.length + 1; index += 1) {
+				for (let index = 0; index < 32; index += 1) {
+					if (selectedMultiSelectLabel(harness.render()) === "Add custom path…")
+						break;
 					harness.handleInput("tui.select.down");
 				}
-				assert.equal(selectedMultiSelectLabel(harness.render()), "Add custom path…");
+				assert.equal(
+					selectedMultiSelectLabel(harness.render()),
+					"Add custom path…",
+				);
 				harness.handleInput("tui.select.confirm");
 				await Promise.resolve();
 				return harness.result;
@@ -887,12 +1050,20 @@ test("included-content custom-path input stops on session replacement", async ()
 	});
 });
 
-test("included-content TUI saves a discovered custom path once", async () => {
+test("included-content TUI saves a configured custom path once", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
 		writeFileSync(path.join(agentDir, "settings.json"), "{}\n");
 		writeFileSync(path.join(agentDir, "custom.json"), "{}\n");
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(
+			localConfigPath(),
+			JSON.stringify(
+				v3GitSettings({ include: ["settings.json", "custom.json"] }),
+			),
+			{
+				mode: 0o600,
+			},
+		);
 		let screen = 0;
 		const { ctx, notifications } = createMockContext({
 			hasUI: true,
@@ -901,9 +1072,15 @@ test("included-content TUI saves a discovered custom path once", async () => {
 				screen += 1;
 				const harness = createCustomSelectorHarness(factory, 100);
 				if (screen === 1) {
-					for (let index = 0; index < BUILT_IN_SYNC_ROOTS.length; index += 1) {
+					for (let index = 0; index < 32; index += 1) {
+						if (selectedMultiSelectLabel(harness.render()) === "custom.json")
+							break;
 						harness.handleInput("tui.select.down");
 					}
+					assert.equal(
+						selectedMultiSelectLabel(harness.render()),
+						"custom.json",
+					);
 					harness.handleInput("tui.select.confirm");
 					await harness.waitForPending();
 					await Promise.resolve();
@@ -917,52 +1094,72 @@ test("included-content TUI saves a discovered custom path once", async () => {
 		});
 		await showFileSelection(ctx, "home");
 		assert.equal(screen, 3);
-		assert.deepEqual((await readLocalConfigObject())?.syncSetups.home.sync.include, [
-			"settings.json",
-			"custom.json",
-		]);
-		assert.match(notifications.at(-1)?.message ?? "", /Saved included content/u);
+		assert.deepEqual(
+			(await readLocalConfigObject())?.syncSetups.home.sync.include,
+			["settings.json"],
+		);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/Saved included content/u,
+		);
 	});
 });
 
 test("included-content save preserves a concurrent include change", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
-		let editorVisits = 0;
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
+		let screen = 0;
 		const { ctx, notifications } = createMockContext({
 			hasUI: true,
 			mode: "tui",
-			select: async (title: string) => {
-				if (title.includes("Included Content")) {
-					editorVisits += 1;
-					return editorVisits === 1 ? "settings.json" : undefined;
-				}
-				await updateLocalConfig((current) => ({
-					...current,
-					syncSetups: {
-						...current.syncSetups,
-						home: {
-							...current.syncSetups.home,
-							sync: { ...current.syncSetups.home.sync, include: ["models.json"] },
+			custom: async (factory: unknown) => {
+				screen += 1;
+				const harness = createCustomSelectorHarness(factory, 100);
+				if (screen === 1) {
+					harness.handleInput("tui.select.down");
+					harness.handleInput("tui.select.confirm");
+					await harness.waitForPending();
+					await Promise.resolve();
+				} else if (screen === 2) {
+					harness.handleInput("tui.select.cancel");
+				} else {
+					await updateLocalConfig((current) => ({
+						...current,
+						syncSetups: {
+							...current.syncSetups,
+							home: {
+								...current.syncSetups.home,
+								sync: {
+									...current.syncSetups.home.sync,
+									include: ["models.json"],
+								},
+							},
 						},
-					},
-				}));
-				return "Save changes";
+					}));
+					harness.handleInput("tui.select.confirm");
+				}
+				return harness.result;
 			},
 		});
 		await showFileSelection(ctx, "home");
-		assert.deepEqual((await readLocalConfigObject())?.syncSetups.home.sync.include, [
-			"models.json",
-		]);
-		assert.match(notifications.at(-1)?.message ?? "", /included content changed.*reopen/iu);
+		assert.deepEqual(
+			(await readLocalConfigObject())?.syncSetups.home.sync.include,
+			["models.json"],
+		);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/included content changed.*reopen/iu,
+		);
 	});
 });
 
 test("included-content editor disposes on session cancellation without saving", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const before = Buffer.from(`${JSON.stringify(v3S3Settings())}\n`);
+		const before = Buffer.from(`${JSON.stringify(v3GitSettings())}\n`);
 		writeFileSync(localConfigPath(), before, { mode: 0o600 });
 		const controller = new AbortController();
 		const { ctx, notifications } = createMockContext({
@@ -984,7 +1181,7 @@ test("included-content editor disposes on session cancellation without saving", 
 test("an empty include reports no selected content before remote transport", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const settings = v3S3Settings({ include: [] });
+		const settings = v3GitSettings({ include: [] });
 		writeFileSync(localConfigPath(), JSON.stringify(settings), { mode: 0o600 });
 		let fetches = 0;
 		const originalFetch = globalThis.fetch;
@@ -993,7 +1190,10 @@ test("an empty include reports no selected content before remote transport", asy
 			throw new Error("unexpected transport");
 		};
 		try {
-			const { ctx, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
+			const { ctx, notifications } = createMockContext({
+				hasUI: true,
+				mode: "rpc",
+			});
 			await syncBoth(ctx, {
 				yes: true,
 				force: false,
@@ -1015,11 +1215,14 @@ test("an empty include reports no selected content before remote transport", asy
 test("unknown and trailing direct arguments fail observably without changing settings", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const before = Buffer.from(`${JSON.stringify(v3S3Settings())}\n`);
+		const before = Buffer.from(`${JSON.stringify(v3GitSettings())}\n`);
 		writeFileSync(localConfigPath(), before, { mode: 0o600 });
 		const mock = createMockPi();
 		sync(mock.pi);
-		const { ctx, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
+		const { ctx, notifications } = createMockContext({
+			hasUI: true,
+			mode: "rpc",
+		});
 		await mock.commands.get("sync")?.handler("status trailing", ctx);
 		assert.match(notifications.at(-1)?.message ?? "", /Unexpected argument/u);
 		assert.deepEqual(readFileSync(localConfigPath()), before);
@@ -1033,13 +1236,24 @@ test("unsupported settings pause startup automatic sync and remain unchanged", a
 		writeFileSync(localConfigPath(), bytes, { mode: 0o600 });
 		const mock = createMockPi();
 		sync(mock.pi);
-		const { ctx, notifications } = createMockContext({ hasUI: true, mode: "tui" });
+		const { ctx, notifications } = createMockContext({
+			hasUI: true,
+			mode: "tui",
+		});
 		await mock.events.get("session_start")?.[0]?.({}, ctx);
 		const output = notifications.map((item) => item.message).join("\n");
 		assert.match(output, /auto sync skipped|version 3 is required/u);
 		assert.doesNotMatch(output, /hidden/u);
 		assert.deepEqual(readFileSync(localConfigPath()), bytes);
 	});
+});
+
+test("token-usage.jsonl is a canonical built-in sync root and not blocked by token denial", async () => {
+	assert.ok(BUILT_IN_SYNC_ROOTS.includes("token-usage.jsonl"));
+	assert.equal(isDeniedPath("token-usage.jsonl"), false);
+	assert.equal(isDeniedPath("token-usage.jsonl.backup"), false);
+	assert.equal(isDeniedPath("auth_token.txt"), true);
+	assert.equal(isDeniedPath("token.json"), true);
 });
 
 async function withStateDirectory(run: () => Promise<void>) {

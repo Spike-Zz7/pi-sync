@@ -1,6 +1,10 @@
 import { syncConfigReviewIdentity } from "./config.js";
-import { SyncDecisionRequiredError } from "./sync-errors.js";
-import { formatDiff, formatSnapshotOnlyDiff, safeTerminalText } from "./sync-format.js";
+
+import {
+	formatDiff,
+	formatSnapshotOnlyDiff,
+	safeTerminalText,
+} from "./sync-format.js";
 import { includeFromSelectionConfig } from "./sync-policy.js";
 import { syncPolicyChanged } from "./sync-state.js";
 import type { AnySyncConfig, Snapshot, SyncState } from "./types.js";
@@ -30,10 +34,23 @@ export interface SyncDecision {
 	directMessage: string;
 }
 
-export {
-	isSyncDecisionRequiredError,
-	SyncDecisionRequiredError,
-} from "./sync-errors.js";
+export class SetupPullRequiresUiError extends Error {}
+
+export class SyncDecisionRequiredError extends Error {
+	readonly decision: SyncDecision;
+
+	constructor(decision: SyncDecision) {
+		super(decision.directMessage);
+		this.name = "SyncDecisionRequiredError";
+		this.decision = decision;
+	}
+}
+
+export function isSyncDecisionRequiredError(
+	error: unknown,
+): error is SyncDecisionRequiredError {
+	return error instanceof SyncDecisionRequiredError;
+}
 
 interface CreateSyncDecisionOptions {
 	kind: SyncDecisionKind;
@@ -48,7 +65,8 @@ interface CreateSyncDecisionOptions {
 
 export function createSyncDecision(options: CreateSyncDecisionOptions) {
 	const { config, state, local, remote, kind } = options;
-	const policyChanged = Boolean(state.lastAppliedSnapshot) && syncPolicyChanged(state, config);
+	const policyChanged =
+		Boolean(state.lastAppliedSnapshot) && syncPolicyChanged(state, config);
 	const previousInclude = includeFromSelectionConfig(state);
 	const currentInclude = [...config.include];
 	const causes = {
@@ -58,15 +76,25 @@ export function createSyncDecision(options: CreateSyncDecisionOptions) {
 	};
 	const causeLines =
 		kind === "first-sync-settings-diverged"
-			? ["This machine and the remote have different Pi settings on first sync."]
+			? [
+					"This machine and the remote have different Pi settings on first sync.",
+				]
 			: kind === "first-sync-sessions-diverged"
-				? ["Pi settings match, but local and remote sessions differ on first sync."]
+				? [
+						"Pi settings match, but local and remote sessions differ on first sync.",
+					]
 				: kind === "remote-empty"
 					? ["The remote storage location is empty."]
 					: [
-							...(causes.localChanged ? ["Local content changed since the last sync."] : []),
-							...(causes.remoteChanged ? ["Remote content changed since the last sync."] : []),
-							...(causes.policyChanged ? ["Included content changed since the last sync."] : []),
+							...(causes.localChanged
+								? ["Local content changed since the last sync."]
+								: []),
+							...(causes.remoteChanged
+								? ["Remote content changed since the last sync."]
+								: []),
+							...(causes.policyChanged
+								? ["Included content changed since the last sync."]
+								: []),
 						];
 	const comparison = remote
 		? formatDiff(local, remote)

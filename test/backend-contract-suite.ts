@@ -12,9 +12,15 @@ interface BackendFixture {
 	dispose?: () => void | Promise<void>;
 }
 
-type BackendFactory = () => SyncBackend | BackendFixture | Promise<SyncBackend | BackendFixture>;
+type BackendFactory = () =>
+	| SyncBackend
+	| BackendFixture
+	| Promise<SyncBackend | BackendFixture>;
 
-export function registerSyncBackendContractSuite(name: string, create: BackendFactory) {
+export function registerSyncBackendContractSuite(
+	name: string,
+	create: BackendFactory,
+) {
 	test(`${name} contract: head, revision, snapshot, history, and diagnostics`, async () => {
 		await withBackend(create, async (backend) => {
 			assert.ok(backend.identity);
@@ -28,15 +34,24 @@ export function registerSyncBackendContractSuite(name: string, create: BackendFa
 					include: ["settings.json", "remote-only.toml"],
 				},
 			};
-			const firstResult = await backend.publishSnapshot(first, expectedRemoteHead(undefined));
+			const firstResult = await backend.publishSnapshot(
+				first,
+				expectedRemoteHead(undefined),
+			);
 			assert.equal(firstResult.head.snapshotId, first.id);
 			assert.deepEqual(firstResult.head.selection, first.selection);
 			assert.match(firstResult.head.revision, /\S/);
 			assert.equal(
-				backend.sameRevision(firstResult.head.revision, firstResult.head.revision),
+				backend.sameRevision(
+					firstResult.head.revision,
+					firstResult.head.revision,
+				),
 				true,
 			);
-			assert.deepEqual(await backend.readSnapshot(firstResult.head.snapshotRef), first);
+			assert.deepEqual(
+				await backend.readSnapshot(firstResult.head.snapshotRef),
+				first,
+			);
 			assert.deepEqual(await backend.listHistory(), [
 				{
 					snapshotRef: firstResult.head.snapshotRef,
@@ -48,13 +63,20 @@ export function registerSyncBackendContractSuite(name: string, create: BackendFa
 			]);
 			assert.ok((await backend.diagnose()).length > 0);
 
-			const restored = { ...first, id: "restored", createdAt: "2026-01-02T00:00:00.000Z" };
+			const restored = {
+				...first,
+				id: "restored",
+				createdAt: "2026-01-02T00:00:00.000Z",
+			};
 			const restoredResult = await backend.publishSnapshot(
 				restored,
 				expectedRemoteHead(firstResult.head),
 			);
 			assert.equal(
-				backend.sameRevision(restoredResult.head.revision, firstResult.head.revision),
+				backend.sameRevision(
+					restoredResult.head.revision,
+					firstResult.head.revision,
+				),
 				false,
 			);
 			assert.deepEqual(
@@ -66,8 +88,11 @@ export function registerSyncBackendContractSuite(name: string, create: BackendFa
 
 	test(`${name} contract: stale and missing-head expectations are typed conflicts`, async () => {
 		await withBackend(create, async (backend) => {
-			const first = snapshot([{ path: "settings.json", content: Buffer.from("first") }]);
-			const head = (await backend.publishSnapshot(first, { kind: "missing" })).head;
+			const first = snapshot([
+				{ path: "settings.json", content: Buffer.from("first") },
+			]);
+			const head = (await backend.publishSnapshot(first, { kind: "missing" }))
+				.head;
 
 			await assert.rejects(
 				backend.publishSnapshot({ ...first, id: "stale" }, { kind: "missing" }),
@@ -90,15 +115,23 @@ export function registerSyncBackendContractSuite(name: string, create: BackendFa
 			controller.abort(new DOMException("cancelled", "AbortError"));
 
 			await assert.rejects(
-				backend.publishSnapshot(snapshot([]), { kind: "missing" }, { signal: controller.signal }),
-				(error: unknown) => error instanceof Error && error.name === "AbortError",
+				backend.publishSnapshot(
+					snapshot([]),
+					{ kind: "missing" },
+					{ signal: controller.signal },
+				),
+				(error: unknown) =>
+					error instanceof Error && error.name === "AbortError",
 			);
 			assert.equal(await backend.readHead(), undefined);
 		});
 	});
 }
 
-async function withBackend(create: BackendFactory, run: (backend: SyncBackend) => Promise<void>) {
+async function withBackend(
+	create: BackendFactory,
+	run: (backend: SyncBackend) => Promise<void>,
+) {
 	const created = await create();
 	const fixture = isFixture(created) ? created : { backend: created };
 	try {
@@ -108,6 +141,8 @@ async function withBackend(create: BackendFactory, run: (backend: SyncBackend) =
 	}
 }
 
-function isFixture(value: SyncBackend | BackendFixture): value is BackendFixture {
+function isFixture(
+	value: SyncBackend | BackendFixture,
+): value is BackendFixture {
 	return "backend" in value;
 }

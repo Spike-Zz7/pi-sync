@@ -1,22 +1,180 @@
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import { runConfirmation } from "@narumitw/pi-tui-kit";
+import type { RunRoute } from "./cancellable-operation.js";
 import {
 	activeLocalConfigPath,
-	isCloudflareR2Endpoint,
 	loadConfig,
 	readLocalConfigObject,
 	readStateForConfig,
 } from "./config.js";
-import { errorMessage, ownRecord, safeTerminalText } from "./manager-helpers.js";
 import {
-	inspectOperationAvailability,
-	type OperationAvailability,
-	operationBlocksChanges,
-	operationCanRecover,
-} from "./operation-availability.js";
-import { type SyncAttentionState, syncAttentionMatchesConfig } from "./sync-attention.js";
-import { compareSyncInclude, syncIncludeSelection } from "./sync-policy.js";
-import { countValidSyncSetups } from "./sync-setups-ui.js";
-import type { AnySyncConfig } from "./types.js";
+	inspectLock,
+	isLockGuardHeld,
+	isStaleLock,
+	type LockInspection,
+} from "./lock.js";
+import {
+	errorMessage,
+	ownRecord,
+	safeTerminalText,
+} from "./manager-helpers.js";
+import {
+	type SyncAttentionState,
+	syncAttentionMatchesConfig,
+} from "./sync-attention.js";
+import {
+	compareSyncInclude,
+	formatIncludedContentSummary,
+} from "./sync-policy.js";
+import type { AnySyncConfig, LockFile } from "./types.js";
+
+export async function countValidSyncSetups(
+	setups: Record<string, unknown> | undefined,
+	signal?: AbortSignal,
+) {
+	let count = 0;
+	for (const name of Object.keys(setups ?? {})) {
+		if (signal?.aborted) throw signal.reason;
+		let valid = false;
+		try {
+			await loadConfig(name);
+			valid = true;
+		} catch {
+			// Invalid setups stay visible in management but are not switchable.
+		}
+		if (signal?.aborted) throw signal.reason;
+		if (valid) count += 1;
+	}
+	return count;
+}
+
+export type OperationAvailability =
+	| { kind: "free" }
+	| { kind: "live"; lock: LockFile }
+	| { kind: "busy"; lock?: LockFile; metadata: LockInspection["status"] }
+	| { kind: "recoverable-stale"; lock: LockFile }
+	| { kind: "recoverable-unreadable" }
+	| { kind: "inspection-error"; message: string };
+
+export interface OperationInspectionDependencies {
+	inspectMetadata(): Promise<LockInspection>;
+	inspectGuard(): Promise<boolean>;
+}
+
+const DEFAULT_INSPECTION_DEPENDENCIES: OperationInspectionDependencies = {
+	inspectMetadata: inspectLock,
+	inspectGuard: isLockGuardHeld,
+};
+
+export async function inspectOperationAvailability(
+	dependencies: OperationInspectionDependencies = DEFAULT_INSPECTION_DEPENDENCIES,
+): Promise<OperationAvailability> {
+	try {
+		const metadata = await dependencies.inspectMetadata();
+		const guardHeld = await dependencies.inspectGuard();
+		return classifyOperationAvailability(metadata, guardHeld);
+	} catch (error) {
+		return { kind: "inspection-error", message: errorMessage(error) };
+	}
+}
+
+export function classifyOperationAvailability(
+	metadata: LockInspection,
+	guardHeld: boolean,
+): OperationAvailability {
+	if (metadata.status === "valid" && !isStaleLock(metadata.lock)) {
+		return { kind: "live", lock: metadata.lock };
+	}
+	if (guardHeld) {
+		return {
+			kind: "busy",
+			metadata: metadata.status,
+			...(metadata.status === "valid" ? { lock: metadata.lock } : {}),
+		};
+	}
+	if (metadata.status === "valid") {
+		return { kind: "recoverable-stale", lock: metadata.lock };
+	}
+	if (metadata.status === "unreadable")
+		return { kind: "recoverable-unreadable" };
+	return { kind: "free" };
+}
+
+export function operationBlocksChanges(availability: OperationAvailability) {
+	return availability.kind !== "free";
+}
+
+export function operationCanRecover(availability: OperationAvailability) {
+	return (
+		availability.kind === "recoverable-stale" ||
+		availability.kind === "recoverable-unreadable"
+	);
+}
+
+export type RecoveryDisposition = "restored" | "stay" | "close";
+
+export async function recoverSyncAccess(
+	ctx: ExtensionCommandContext,
+	manager: ManagerDescription,
+	runRoute: RunRoute,
+	sessionSignal: AbortSignal | undefined,
+	actionSignal: AbortSignal,
+): Promise<RecoveryDisposition> {
+	const operation = manager.operation;
+	if (!operation || !operationCanRecover(operation)) {
+		ctx.ui.notify(
+			"Operation status changed. Refresh the manager before retrying recovery.",
+			"warning",
+		);
+		return "stay";
+	}
+	const signal = sessionSignal
+		? AbortSignal.any([sessionSignal, actionSignal])
+		: actionSignal;
+	if (signal.aborted) return "close";
+	const unreadable = operation.kind === "recoverable-unreadable";
+	const details = unreadable
+		? "Pi-sync cannot verify who owns the unreadable lock. Close other Pi sessions that may be syncing before continuing."
+		: `The recorded ${safeTerminalText(operation.lock.command)} operation (pid ${operation.lock.pid}) appears to have stopped. Close other Pi sessions that may still be syncing before continuing.`;
+	const confirmation = await runConfirmation(ctx, {
+		title: "Restore sync access?",
+		message: [
+			details,
+			"",
+			"This removes only the local operation lock.",
+			"It does not change settings, local files, sync state, or remote data.",
+		].join("\n"),
+		confirmLabel: "Remove local lock and continue",
+		cancelLabel: "Cancel",
+		signal,
+		isCurrent: () => !signal.aborted,
+		onError: (_currentCtx, error) => {
+			ctx.ui.notify(
+				`Recovery confirmation failed: ${safeTerminalText(errorMessage(error))}`,
+				"error",
+			);
+		},
+	});
+	if (confirmation.kind === "stale") return "close";
+	if (confirmation.kind === "closed") {
+		if (confirmation.reason === "close") return "close";
+		if (!signal.aborted) {
+			ctx.ui.notify(
+				"Recovery cancelled; the local operation lock was not changed.",
+				"info",
+			);
+		}
+		return "stay";
+	}
+	if (confirmation.kind !== "confirmed") return "stay";
+	if (signal.aborted) return "close";
+	await runRoute(unreadable ? "unlock --stale" : "unlock", signal);
+	if (signal.aborted) return "close";
+	const latest = await inspectOperationAvailability();
+	if (signal.aborted) return "close";
+	return latest.kind === "free" ? "restored" : "stay";
+}
 
 export const MAIN_MENU_ACTIONS = [
 	"Sync now (recommended)",
@@ -59,12 +217,22 @@ export async function describeManagerState(
 	}
 	if (!raw) {
 		return {
-			title: ["Manage sync", "", "Not set up.", "", "What do you want to do?"].join("\n"),
+			title: [
+				"Manage sync",
+				"",
+				"Not set up.",
+				"",
+				"What do you want to do?",
+			].join("\n"),
 			actions: ["Set up sync", "Help"],
 		};
 	}
 	const configuredTargets = ownRecord(raw.syncSetups);
-	if (raw.version === 3 && configuredTargets && Object.keys(configuredTargets).length === 0) {
+	if (
+		raw.version === 3 &&
+		configuredTargets &&
+		Object.keys(configuredTargets).length === 0
+	) {
 		return {
 			title: [
 				"Manage sync",
@@ -81,7 +249,6 @@ export async function describeManagerState(
 		const config = await loadConfig();
 		const operation = await inspectOperation();
 		const changesBlocked = operationBlocksChanges(operation);
-		const selection = syncIncludeSelection(config.include);
 		let currentAttention: SyncAttentionState | undefined;
 		if (attention) {
 			try {
@@ -89,7 +256,8 @@ export async function describeManagerState(
 					attention.decision.setupName === config.setupName
 						? config
 						: await loadConfig(attention.decision.setupName);
-				if (syncAttentionMatchesConfig(attention, attentionConfig)) currentAttention = attention;
+				if (syncAttentionMatchesConfig(attention, attentionConfig))
+					currentAttention = attention;
 			} catch {
 				currentAttention = undefined;
 			}
@@ -112,7 +280,8 @@ export async function describeManagerState(
 				: syncState
 					? "Never synced"
 					: "Unavailable";
-		const canSwitch = (await countValidSyncSetups(configuredTargets, signal)) > 1;
+		const canSwitch =
+			(await countValidSyncSetups(configuredTargets, signal)) > 1;
 		const mainActions = MAIN_MENU_ACTIONS.filter(
 			(action) => action !== "Switch sync setup" || canSwitch,
 		);
@@ -121,7 +290,7 @@ export async function describeManagerState(
 			"",
 			`Current sync setup: ${safeTerminalText(config.setupName)}`,
 			`Storage: ${backendStorageDescription(config)}`,
-			`Included: ${selection.builtIns.length} built-in group${selection.builtIns.length === 1 ? "" : "s"} · ${selection.custom.length} extra path${selection.custom.length === 1 ? "" : "s"} · Sessions ${selection.sessions ? "on" : "off"}`,
+			`Included: ${formatIncludedContentSummary(config.include)}`,
 			`Automatic sync: ${config.automatic ? "On" : "Off"}`,
 			`Last applied: ${lastAppliedSnapshot}`,
 			...(currentAttention
@@ -150,12 +319,18 @@ export async function describeManagerState(
 				? ["Manage sync", ...operationStatusLines(operation)]
 				: ordinaryTitle
 			).join("\n"),
-			actions: operationActions(operation, noSyncedContent, canSwitch, mainActions),
+			actions: operationActions(
+				operation,
+				noSyncedContent,
+				canSwitch,
+				mainActions,
+			),
 			operation,
 			...(currentAttention
 				? {
 						attention: currentAttention,
-						attentionBlocksSync: currentAttention.decision.setupName === config.setupName,
+						attentionBlocksSync:
+							currentAttention.decision.setupName === config.setupName,
 						attentionReviewDisabled: changesBlocked,
 					}
 				: {}),
@@ -173,7 +348,12 @@ export async function describeManagerState(
 				"",
 				"What do you want to do?",
 			].join("\n"),
-			actions: ["Sync setups…", "Storage connections…", "History & recovery…", "Help"],
+			actions: [
+				"Sync setups…",
+				"Storage connections…",
+				"History & recovery…",
+				"Help",
+			],
 		};
 	}
 }
@@ -193,10 +373,20 @@ function operationActions(
 		];
 	}
 	if (operation.kind !== "free") {
-		return ["Refresh operation status", "Status & changes", "History & recovery…", "Help"];
+		return [
+			"Refresh operation status",
+			"Status & changes",
+			"History & recovery…",
+			"Help",
+		];
 	}
 	return noSyncedContent
-		? ["Settings", ...(canSwitch ? ["Switch sync setup"] : []), "Status & changes", "More…"]
+		? [
+				"Settings",
+				...(canSwitch ? ["Switch sync setup"] : []),
+				"Status & changes",
+				"More…",
+			]
 		: mainActions;
 }
 
@@ -205,7 +395,11 @@ function operationStatusLines(operation: OperationAvailability): string[] {
 		case "free":
 			return [];
 		case "live": {
-			const command = truncateToWidth(safeTerminalText(operation.lock.command), 16, "…");
+			const command = truncateToWidth(
+				safeTerminalText(operation.lock.command),
+				16,
+				"…",
+			);
 			return [
 				`Running: ${command} (pid ${operation.lock.pid}). Wait, then refresh; Settings and More return.`,
 			];
@@ -231,18 +425,5 @@ function operationStatusLines(operation: OperationAvailability): string[] {
 
 export function backendStorageDescription(config: AnySyncConfig) {
 	const connection = safeTerminalText(config.connectionName);
-	switch (config.backend.type) {
-		case "s3": {
-			const type =
-				config.backend.profile.kind === "r2" ||
-				isCloudflareR2Endpoint(config.backend.profile.endpoint)
-					? "Cloudflare R2"
-					: "S3-compatible";
-			return `${type} · ${connection} · ${safeTerminalText(config.backend.destination.bucket)}`;
-		}
-		case "webdav":
-			return `WebDAV · ${connection} · ${safeTerminalText(config.backend.destination.path)}`;
-		case "git":
-			return `Git · ${connection} · ${safeTerminalText(config.backend.destination.branch)}`;
-	}
+	return `Git · ${connection} · ${safeTerminalText(config.backend.destination.branch)}`;
 }

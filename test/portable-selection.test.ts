@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { readSnapshotForHead } from "../src/remote-snapshot.js";
+import { readSnapshotForHead } from "../src/sync-backend.js";
 import {
 	compareSyncInclude,
 	discoverLegacySnapshotInclude,
@@ -22,11 +22,17 @@ test("portable selection comparison preserves exact selected-but-missing intent"
 		"pi-starship.toml",
 		"sessions",
 	]);
-	assert.deepEqual(compareSyncInclude(["settings.json", "AGENTS.md"], remote.selection.include), {
-		same: false,
-		remoteOnly: ["pi-starship.toml", "sessions"],
-		localOnly: ["AGENTS.md"],
-	});
+	assert.deepEqual(
+		compareSyncInclude(
+			["settings.json", "AGENTS.md"],
+			remote.selection.include,
+		),
+		{
+			same: false,
+			remoteOnly: ["pi-starship.toml", "sessions"],
+			localOnly: ["AGENTS.md"],
+		},
+	);
 });
 
 test("portable selection rejects policies that exceed bounded collection and path sizes", () => {
@@ -52,7 +58,10 @@ test("portable selection rejects policies that exceed bounded collection and pat
 			snapshotSelectionInclude({
 				selection: {
 					version: 1,
-					include: Array.from({ length: 1_024 }, (_, index) => `path-${index}-${"x".repeat(250)}`),
+					include: Array.from(
+						{ length: 1_024 },
+						(_, index) => `path-${index}-${"x".repeat(250)}`,
+					),
 				},
 			}),
 		/too large|limit/i,
@@ -84,7 +93,10 @@ test("legacy snapshot discovery is safe, partial, and rooted", () => {
 		{ path: "sessions/project/session.jsonl", content: Buffer.from("session") },
 		{ path: ".env", content: Buffer.from("secret") },
 		{ path: "unsafe\\nested.txt", content: Buffer.from("unsafe") },
-		{ path: `control-${String.fromCharCode(27)}.txt`, content: Buffer.from("unsafe") },
+		{
+			path: `control-${String.fromCharCode(27)}.txt`,
+			content: Buffer.from("unsafe"),
+		},
 	]);
 	assert.deepEqual(discoverLegacySnapshotInclude(legacy), [
 		"settings.json",

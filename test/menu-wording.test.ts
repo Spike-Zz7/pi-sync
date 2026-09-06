@@ -12,21 +12,24 @@ function settings() {
 		activeSyncSetup: "home",
 		onSwitch: "ask-before-pull",
 		storageConnections: {
-			r2: {
-				type: "s3",
-				endpoint: "https://example.r2.cloudflarestorage.com",
-				region: "auto",
-				credentials: { accessKeyId: "access", secretAccessKey: "secret" },
-			},
-			git: { type: "git", remote: "git@github.com:user/pi-sync.git" },
+			origin: { type: "git", remote: "git@github.com:user/pi-sync.git" },
+			backup: { type: "git", remote: "git@github.com:user/backup.git" },
 		},
 		syncSetups: {
 			home: {
-				storage: { connection: "r2", bucket: "home-bucket", path: "pi-sync/home" },
+				storage: {
+					connection: "origin",
+					branch: "pi-sync/home",
+					path: "pi-sync/home",
+				},
 				sync: { include: ["settings.json", "AGENTS.md"], automatic: true },
 			},
 			work: {
-				storage: { connection: "git", branch: "pi-sync/work", path: "pi-sync/work" },
+				storage: {
+					connection: "backup",
+					branch: "pi-sync/work",
+					path: "pi-sync/work",
+				},
 				sync: { include: ["settings.json"], automatic: false },
 			},
 		},
@@ -59,7 +62,7 @@ test("main menu uses only storage connection and sync setup resource wording", a
 		const rendered = titles.join("\n");
 		assert.match(rendered, /Manage sync/u);
 		assert.match(rendered, /Current sync setup: home/u);
-		assert.match(rendered, /Storage: Cloudflare R2 · r2 · home-bucket/u);
+		assert.match(rendered, /Storage: Git · origin · pi-sync\/home/u);
 		assert.match(rendered, /Automatic sync: On/u);
 		assert.doesNotMatch(
 			rendered,
@@ -72,7 +75,15 @@ test("Sync setups list and detail expose current marker, Make current, edit, rem
 	await withSettings(async () => {
 		const titles: string[] = [];
 		const optionsSeen: string[][] = [];
-		const choices = ["More…", "Sync setups…", "work", "Back", undefined, "Back", undefined];
+		const choices = [
+			"More…",
+			"Sync setups…",
+			"work",
+			"Back",
+			undefined,
+			"Back",
+			undefined,
+		];
 		const { ctx } = createMockContext({
 			hasUI: true,
 			mode: "tui",
@@ -86,8 +97,14 @@ test("Sync setups list and detail expose current marker, Make current, edit, rem
 		const list = optionsSeen.find((items) => items.includes("home (current)"));
 		assert.ok(list?.includes("Add sync setup"));
 		const detail = optionsSeen.find((items) => items.includes("Make current…"));
-		assert.deepEqual(detail, ["Make current…", "Edit sync setup…", "Remove sync setup…", "Back"]);
-		assert.match(titles.join("\n"), /Storage connection: git/u);
+		assert.deepEqual(detail, [
+			"Make current…",
+			"Included content…",
+			"Edit sync setup…",
+			"Remove sync setup…",
+			"Back",
+		]);
+		assert.match(titles.join("\n"), /Storage connection: backup/u);
 	});
 });
 
@@ -95,7 +112,15 @@ test("Storage connections list and detail are symmetric and redact credentials",
 	await withSettings(async () => {
 		const titles: string[] = [];
 		const optionsSeen: string[][] = [];
-		const choices = ["More…", "Storage connections…", "r2", "Back", undefined, "Back", undefined];
+		const choices = [
+			"More…",
+			"Storage connections…",
+			"origin",
+			"Back",
+			undefined,
+			"Back",
+			undefined,
+		];
 		const { ctx } = createMockContext({
 			hasUI: true,
 			mode: "tui",
@@ -106,23 +131,35 @@ test("Storage connections list and detail are symmetric and redact credentials",
 			},
 		});
 		await showSyncManager(ctx, async () => undefined);
-		const list = optionsSeen.find((items) => items.includes("Add storage connection"));
-		assert.ok(list?.includes("r2"));
-		const detail = titles.find((title) => title.includes("Storage connection “r2”")) ?? "";
-		assert.match(detail, /Credentials: Settings file/u);
+		const list = optionsSeen.find((items) =>
+			items.includes("Add storage connection"),
+		);
+		assert.ok(list?.includes("origin"));
+		const detail =
+			titles.find((title) => title.includes("Storage connection “origin”")) ??
+			"";
+		assert.match(detail, /Type: Git/u);
+		assert.match(detail, /Credentials: Git credential helper/u);
 		assert.match(detail, /Used by: home/u);
-		assert.doesNotMatch(detail, /access|secret/u);
 	});
 });
 
 test("the sole current sync setup offers removal to return to an empty catalog", async () => {
 	const value = settings();
 	delete (value.syncSetups as Record<string, unknown>).work;
-	delete (value.storageConnections as Record<string, unknown>).git;
+	delete (value.storageConnections as Record<string, unknown>).backup;
 	await withSettings(async () => {
 		const titles: string[] = [];
 		const optionsSeen: string[][] = [];
-		const choices = ["More…", "Sync setups…", "home (current)", "Back", "Back", "Back", undefined];
+		const choices = [
+			"More…",
+			"Sync setups…",
+			"home (current)",
+			"Back",
+			"Back",
+			"Back",
+			undefined,
+		];
 		const { ctx } = createMockContext({
 			hasUI: true,
 			mode: "tui",
@@ -133,31 +170,16 @@ test("the sole current sync setup offers removal to return to an empty catalog",
 			},
 		});
 		await showSyncManager(ctx, async () => undefined);
-		const detail = optionsSeen.find((items) => items.includes("Edit sync setup…"));
-		assert.deepEqual(detail, ["Edit sync setup…", "Remove sync setup…", "Back"]);
+		const detail = optionsSeen.find((items) =>
+			items.includes("Edit sync setup…"),
+		);
+		assert.deepEqual(detail, [
+			"Included content…",
+			"Edit sync setup…",
+			"Remove sync setup…",
+			"Back",
+		]);
 		assert.doesNotMatch(titles.join("\n"), /Remove unavailable/u);
-	}, value);
-});
-
-test("S3-compatible lookalike hosts are not labeled as Cloudflare R2", async () => {
-	const value = settings();
-	value.storageConnections.r2.endpoint =
-		"https://example.r2.cloudflarestorage.com.attacker.example";
-	await withSettings(async () => {
-		const titles: string[] = [];
-		const choices = ["More…", "Storage connections…", "r2", "Back", undefined, "Back", undefined];
-		const { ctx } = createMockContext({
-			hasUI: true,
-			mode: "tui",
-			select: async (title: string) => {
-				titles.push(title);
-				return choices.shift();
-			},
-		});
-		await showSyncManager(ctx, async () => undefined);
-		const detail = titles.find((title) => title.includes("Storage connection “r2”")) ?? "";
-		assert.match(detail, /Type: S3-compatible/u);
-		assert.doesNotMatch(detail, /Type: Cloudflare R2/u);
 	}, value);
 });
 

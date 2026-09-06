@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import { isDeniedPath } from "../src/paths.js";
 import {
 	legacyStateDir,
@@ -22,6 +29,9 @@ test("snapshot policy denies canonical and legacy state directories", () => {
 	assert.equal(isDeniedPath(".pisync/default.state.json"), true);
 	assert.equal(isDeniedPath("nested/PI-SYNC/backups/snapshot.json.gz"), true);
 	assert.equal(isDeniedPath(".pi-sync-state-migration.lock/owner"), true);
+	assert.equal(isDeniedPath("auth.json"), true);
+	assert.equal(isDeniedPath("auth.json.backup"), true);
+	assert.equal(isDeniedPath(".auth.json.backup"), true);
 });
 
 test("legacy installations keep using .pisync until migration succeeds", async () => {
@@ -43,7 +53,10 @@ test("legacy state is atomically migrated with nested contents preserved", async
 		assert.equal(existsSync(legacy), false);
 		assert.equal(stateDir(), path.join(agentDir, "pi-sync"));
 		assert.equal(
-			readFileSync(path.join(stateDir(), "backups", "snapshot.json.gz"), "utf8"),
+			readFileSync(
+				path.join(stateDir(), "backups", "snapshot.json.gz"),
+				"utf8",
+			),
 			"backup",
 		);
 	});
@@ -89,7 +102,10 @@ test("canonical state access does not take the legacy migration lock", async () 
 	await withTempHome(async (agentDir) => {
 		mkdirSync(path.join(agentDir, "pi-sync"), { recursive: true });
 		await withStateDirectoryAccess(async () => {
-			assert.equal(existsSync(path.join(agentDir, ".pi-sync-state-migration.lock")), false);
+			assert.equal(
+				existsSync(path.join(agentDir, ".pi-sync-state-migration.lock")),
+				false,
+			);
 		});
 	});
 });
@@ -128,7 +144,9 @@ test("overlapping legacy state users share migration protection without lock con
 			const outcome = await Promise.race([
 				secondEntered.then(() => "entered" as const),
 				secondOutcome,
-				new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 100)),
+				new Promise<"blocked">((resolve) =>
+					setTimeout(() => resolve("blocked"), 100),
+				),
 			]);
 			assert.equal(outcome, "entered");
 		} finally {
@@ -180,8 +198,14 @@ test("concurrent upgraded processes serialize one migration", async () => {
 			migrateLegacyStateDirectory(),
 		]);
 
-		assert.deepEqual(results.map((result) => result.status).sort(), ["migrated", "ready"]);
-		assert.equal(readFileSync(path.join(stateDir(), "default.state.json"), "utf8"), "state");
+		assert.deepEqual(results.map((result) => result.status).sort(), [
+			"migrated",
+			"ready",
+		]);
+		assert.equal(
+			readFileSync(path.join(stateDir(), "default.state.json"), "utf8"),
+			"state",
+		);
 	});
 });
 
@@ -190,7 +214,10 @@ test("conflicting canonical and legacy roots fail closed", async () => {
 		mkdirSync(path.join(agentDir, ".pisync"), { recursive: true });
 		mkdirSync(path.join(agentDir, "pi-sync"), { recursive: true });
 
-		assert.throws(() => stateDir(), /both .*\.pisync.*pi-sync|both .*pi-sync.*\.pisync/i);
+		assert.throws(
+			() => stateDir(),
+			/both .*\.pisync.*pi-sync|both .*pi-sync.*\.pisync/i,
+		);
 		await assert.rejects(
 			migrateLegacyStateDirectory(),
 			/both .*\.pisync.*pi-sync|both .*pi-sync.*\.pisync/i,
@@ -206,5 +233,29 @@ test("symlinked state roots fail closed", async () => {
 
 		assert.throws(() => stateDir(), /symbolic link/i);
 		await assert.rejects(migrateLegacyStateDirectory(), /symbolic link/i);
+	});
+});
+
+test("state migration rechecks canonical root after asynchronous legacy lock probes", async () => {
+	await withTempHome(async (agentDir) => {
+		const legacy = path.join(agentDir, ".pisync");
+		const canonical = path.join(agentDir, "pi-sync");
+		mkdirSync(legacy, { recursive: true });
+		writeFileSync(path.join(legacy, "state.json"), "legacy state");
+		const lstat = fs.lstat.bind(fs);
+		const spy = vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+			if (String(args[0]) === path.join(legacy, "lock")) mkdirSync(canonical);
+			return lstat(...args);
+		});
+		try {
+			await assert.rejects(migrateLegacyStateDirectory(), /Both legacy/u);
+		} finally {
+			spy.mockRestore();
+		}
+		assert.equal(
+			readFileSync(path.join(legacy, "state.json"), "utf8"),
+			"legacy state",
+		);
+		assert.deepEqual(await fs.readdir(canonical), []);
 	});
 });

@@ -26,16 +26,22 @@ export async function decodeSnapshot(
 		write(chunk: Buffer, _encoding, callback) {
 			total += chunk.byteLength;
 			if (total > limit) {
-				callback(new Error(`Decompressed snapshot exceeds the ${limit}-byte limit.`));
+				callback(
+					new Error(`Decompressed snapshot exceeds the ${limit}-byte limit.`),
+				);
 				return;
 			}
 			chunks.push(Buffer.from(chunk));
 			callback();
 		},
 	});
-	await pipeline(Readable.from([buffer]), createGunzip(), sink, { signal: options.signal });
+	await pipeline(Readable.from([buffer]), createGunzip(), sink, {
+		signal: options.signal,
+	});
 	throwIfAborted(options.signal);
-	const parsed = JSON.parse(Buffer.concat(chunks, total).toString("utf8")) as Snapshot;
+	const parsed = JSON.parse(
+		Buffer.concat(chunks, total).toString("utf8"),
+	) as Snapshot;
 	if (parsed.version !== VERSION || !Array.isArray(parsed.files)) {
 		throw new Error("Unsupported snapshot format.");
 	}

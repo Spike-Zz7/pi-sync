@@ -23,7 +23,11 @@ import {
 	syncBoth,
 } from "../src/sync-operations.js";
 import type { CommandOptions, Snapshot, SyncConfig } from "../src/types.js";
-import { v3S3Settings as requiredConfig, snapshot, withTempHome } from "./helpers.js";
+import {
+	v3GitSettings as requiredConfig,
+	snapshot,
+	withTempHome,
+} from "./helpers.js";
 import { MemorySyncBackend } from "./memory-sync-backend.js";
 
 test("fake backend exercises push, pull, history, rollback, and revision state", async () => {
@@ -39,16 +43,30 @@ test("fake backend exercises push, pull, history, rollback, and revision state",
 		await push(ctx, commandOptions(), undefined, factory);
 		const pushed = await backend.readHead();
 		assert.ok(pushed);
-		assert.equal((await readStateForConfig(config)).lastRemoteRevision, pushed.revision);
+		assert.equal(
+			(await readStateForConfig(config)).lastRemoteRevision,
+			pushed.revision,
+		);
 		const pushedSnapshot = await backend.readSnapshot(pushed.snapshotRef);
-		const revisionOnly = await backend.publishSnapshot(pushedSnapshot, expectedRemoteHead(pushed));
+		const revisionOnly = await backend.publishSnapshot(
+			pushedSnapshot,
+			expectedRemoteHead(pushed),
+		);
 		await status(ctx, commandOptions(), factory);
-		assert.match(notifications.at(-1)?.message ?? "", /remote changed since last sync: yes/);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/remote changed since last sync: yes/,
+		);
 		await syncBoth(ctx, commandOptions(), factory);
-		assert.equal((await readStateForConfig(config)).lastRemoteRevision, revisionOnly.head.revision);
+		assert.equal(
+			(await readStateForConfig(config)).lastRemoteRevision,
+			revisionOnly.head.revision,
+		);
 
 		const remote = {
-			...snapshot([{ path: "settings.json", content: Buffer.from('{"remote":true}\n') }]),
+			...snapshot([
+				{ path: "settings.json", content: Buffer.from('{"remote":true}\n') },
+			]),
 			id: "remote-change",
 		};
 		const remoteResult = await backend.publishSnapshot(
@@ -56,13 +74,26 @@ test("fake backend exercises push, pull, history, rollback, and revision state",
 			expectedRemoteHead(revisionOnly.head),
 		);
 		await pull(ctx, commandOptions(), factory);
-		assert.equal(readFileSync(path.join(agentDir, "settings.json"), "utf8"), '{"remote":true}\n');
-		assert.equal((await readStateForConfig(config)).lastRemoteRevision, remoteResult.head.revision);
+		assert.equal(
+			readFileSync(path.join(agentDir, "settings.json"), "utf8"),
+			'{"remote":true}\n',
+		);
+		assert.equal(
+			(await readStateForConfig(config)).lastRemoteRevision,
+			remoteResult.head.revision,
+		);
 
 		await history(ctx, commandOptions(), factory);
-		assert.match(notifications.map((item) => item.message).join("\n"), /remote-change/);
+		assert.match(
+			notifications.map((item) => item.message).join("\n"),
+			/remote-change/,
+		);
 
-		await rollback(ctx, { ...commandOptions(), args: [pushed.snapshotRef] }, factory);
+		await rollback(
+			ctx,
+			{ ...commandOptions(), args: [pushed.snapshotRef] },
+			factory,
+		);
 		const restoredHead = await backend.readHead();
 		assert.ok(restoredHead);
 		assert.notEqual(restoredHead.snapshotRef, pushed.snapshotRef);
@@ -71,8 +102,14 @@ test("fake backend exercises push, pull, history, rollback, and revision state",
 			(await backend.listHistory()).map((entry) => entry.snapshotId),
 			[pushed.snapshotId, remote.id, restoredHead.snapshotId],
 		);
-		assert.equal(readFileSync(path.join(agentDir, "settings.json"), "utf8"), '{"local":true}\n');
-		assert.equal((await readStateForConfig(config)).lastRemoteRevision, restoredHead.revision);
+		assert.equal(
+			readFileSync(path.join(agentDir, "settings.json"), "utf8"),
+			'{"local":true}\n',
+		);
+		assert.equal(
+			(await readStateForConfig(config)).lastRemoteRevision,
+			restoredHead.revision,
+		);
 	});
 });
 
@@ -80,33 +117,52 @@ test("history rollback aborts if the selected backend destination changes", asyn
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
 		writeFileSync(path.join(agentDir, "settings.json"), '{"current":true}\n');
-		const initialSettings = v3SettingsWithBucket("first-bucket");
+		const initialSettings = v3SettingsWithBranch("first-branch");
 		writeFileSync(localConfigPath(), JSON.stringify(initialSettings));
 		const first = new MemorySyncBackend("memory:first", "memory · first");
 		const second = new MemorySyncBackend("memory:second", "memory · second");
 		const historical = {
-			...snapshot([{ path: "settings.json", content: Buffer.from('{"historical":true}\n') }]),
+			...snapshot([
+				{
+					path: "settings.json",
+					content: Buffer.from('{"historical":true}\n'),
+				},
+			]),
 			id: "historical",
 		};
 		await first.publishSnapshot(historical, { kind: "missing" });
 		const current = {
-			...snapshot([{ path: "settings.json", content: Buffer.from('{"current":true}\n') }]),
+			...snapshot([
+				{ path: "settings.json", content: Buffer.from('{"current":true}\n') },
+			]),
 			id: "current",
 		};
-		await first.publishSnapshot(current, expectedRemoteHead(await first.readHead()));
+		await first.publishSnapshot(
+			current,
+			expectedRemoteHead(await first.readHead()),
+		);
 		const factory = (config: SyncConfig) =>
-			config.backend.destination.bucket === "first-bucket" ? first : second;
+			config.backend.destination.branch === "first-branch" ? first : second;
 		const { ctx } = createMockContext({
 			hasUI: true,
 			mode: "tui",
 			select: async (_title: string, options: string[]) => {
-				writeFileSync(localConfigPath(), JSON.stringify(v3SettingsWithBucket("second-bucket")));
+				writeFileSync(
+					localConfigPath(),
+					JSON.stringify(v3SettingsWithBranch("second-branch")),
+				);
 				return options[0];
 			},
 		});
 
-		await assert.rejects(history(ctx, commandOptions(), factory), /storage location changed/i);
-		assert.equal(readFileSync(path.join(agentDir, "settings.json"), "utf8"), '{"current":true}\n');
+		await assert.rejects(
+			history(ctx, commandOptions(), factory),
+			/storage location changed/i,
+		);
+		assert.equal(
+			readFileSync(path.join(agentDir, "settings.json"), "utf8"),
+			'{"current":true}\n',
+		);
 		assert.equal((await first.readHead())?.snapshotId, current.id);
 		assert.equal(await second.readHead(), undefined);
 	});
@@ -119,24 +175,41 @@ test("rollback reports a typed local/remote partial failure with its backup", as
 		writeFileSync(localConfigPath(), JSON.stringify(requiredConfig()));
 		const backend = new ConflictingRollbackBackend();
 		const historical = {
-			...snapshot([{ path: "settings.json", content: Buffer.from('{"historical":true}\n') }]),
+			...snapshot([
+				{
+					path: "settings.json",
+					content: Buffer.from('{"historical":true}\n'),
+				},
+			]),
 			id: "historical",
 		};
 		await backend.publishSnapshot(historical, { kind: "missing" });
 		const current = {
-			...snapshot([{ path: "settings.json", content: Buffer.from('{"current":true}\n') }]),
+			...snapshot([
+				{ path: "settings.json", content: Buffer.from('{"current":true}\n') },
+			]),
 			id: "current",
 		};
-		await backend.publishSnapshot(current, expectedRemoteHead(await backend.readHead()));
+		await backend.publishSnapshot(
+			current,
+			expectedRemoteHead(await backend.readHead()),
+		);
 		backend.failRollbackPublication = true;
 		const { ctx } = createMockContext({ hasUI: true });
 
 		await assert.rejects(
-			rollback(ctx, { ...commandOptions(), args: [historical.id] }, () => backend),
+			rollback(
+				ctx,
+				{ ...commandOptions(), args: [historical.id] },
+				() => backend,
+			),
 			(error: unknown) => {
 				assert.ok(error instanceof RollbackPublicationError);
 				assert.equal(existsSync(error.backupPath), true);
-				assert.match(error.message, /applied locally.*remote publication failed/i);
+				assert.match(
+					error.message,
+					/applied locally.*remote publication failed/i,
+				);
 				return true;
 			},
 		);
@@ -155,29 +228,51 @@ test("rollback rejects a remote head change that lands during confirmation", asy
 		writeFileSync(localConfigPath(), JSON.stringify(requiredConfig()));
 		const backend = new MemorySyncBackend();
 		const historical = {
-			...snapshot([{ path: "settings.json", content: Buffer.from('{"historical":true}\n') }]),
+			...snapshot([
+				{
+					path: "settings.json",
+					content: Buffer.from('{"historical":true}\n'),
+				},
+			]),
 			id: "historical",
 		};
 		await backend.publishSnapshot(historical, { kind: "missing" });
 		const current = {
-			...snapshot([{ path: "settings.json", content: Buffer.from('{"current":true}\n') }]),
+			...snapshot([
+				{ path: "settings.json", content: Buffer.from('{"current":true}\n') },
+			]),
 			id: "current",
 		};
-		await backend.publishSnapshot(current, expectedRemoteHead(await backend.readHead()));
+		await backend.publishSnapshot(
+			current,
+			expectedRemoteHead(await backend.readHead()),
+		);
 		const concurrent = {
-			...snapshot([{ path: "settings.json", content: Buffer.from('{"concurrent":true}\n') }]),
+			...snapshot([
+				{
+					path: "settings.json",
+					content: Buffer.from('{"concurrent":true}\n'),
+				},
+			]),
 			id: "concurrent",
 		};
 		const { ctx } = createMockContext({
 			hasUI: true,
 			confirm: async () => {
-				await backend.publishSnapshot(concurrent, expectedRemoteHead(await backend.readHead()));
+				await backend.publishSnapshot(
+					concurrent,
+					expectedRemoteHead(await backend.readHead()),
+				);
 				return true;
 			},
 		});
 
 		await assert.rejects(
-			rollback(ctx, { ...commandOptions(), args: [historical.id], yes: false }, () => backend),
+			rollback(
+				ctx,
+				{ ...commandOptions(), args: [historical.id], yes: false },
+				() => backend,
+			),
 			RollbackPublicationError,
 		);
 		assert.equal((await backend.readHead())?.snapshotId, concurrent.id);
@@ -197,7 +292,10 @@ test("push reports a typed partial outcome when remote commits but local state c
 			push(ctx, commandOptions(), undefined, () => backend),
 			(error: unknown) => {
 				assert.ok(error instanceof PublicationStatePersistenceError);
-				assert.match(error.message, /remote publication.*active.*state could not be saved/i);
+				assert.match(
+					error.message,
+					/remote publication.*active.*state could not be saved/i,
+				);
 				return true;
 			},
 		);
@@ -221,13 +319,19 @@ test("global setting skips push secret blocking but keeps doctor scanning", asyn
 		);
 		assert.equal(await blockedBackend.readHead(), undefined);
 
-		writeFileSync(localConfigPath(), JSON.stringify(requiredConfig({ skipSecretScan: true })));
+		writeFileSync(
+			localConfigPath(),
+			JSON.stringify(requiredConfig({ skipSecretScan: true })),
+		);
 		const allowedBackend = new MemorySyncBackend();
 		const allowed = createMockContext({ hasUI: true });
 		await push(allowed.ctx, commandOptions(), undefined, () => allowedBackend);
 		assert.ok(await allowedBackend.readHead());
 		await doctor(allowed.ctx, commandOptions(), () => allowedBackend);
-		assert.match(allowed.notifications.at(-1)?.message ?? "", /possible secrets found/u);
+		assert.match(
+			allowed.notifications.at(-1)?.message ?? "",
+			/possible secrets found/u,
+		);
 	});
 });
 
@@ -249,11 +353,20 @@ test("fake backend exercises status, diff, sync, and backend diagnostics", async
 		assert.match(output, /remote: empty/);
 		assert.match(output, /Remote is empty\. Local push would upload/);
 		assert.match(output, /Pushed 1 files/);
-		assert.match(output, /publication safety: atomic-conditional \(verified atomic precondition\)/);
+		assert.match(
+			output,
+			/publication safety: atomic-conditional \(verified atomic precondition\)/,
+		);
 		assert.match(output, /memory backend: ok/);
 		const doctorOutput = notifications.at(-1)?.message ?? "";
-		assert.ok(doctorOutput.indexOf("secret scan:") < doctorOutput.indexOf("storage location:"));
-		assert.ok(doctorOutput.indexOf("lock:") < doctorOutput.indexOf("publication safety:"));
+		assert.ok(
+			doctorOutput.indexOf("secret scan:") <
+				doctorOutput.indexOf("storage location:"),
+		);
+		assert.ok(
+			doctorOutput.indexOf("lock:") <
+				doctorOutput.indexOf("publication safety:"),
+		);
 	});
 });
 
@@ -264,7 +377,9 @@ test("forced fake-backend push re-reads the head and preserves newly observed un
 		writeFileSync(localConfigPath(), JSON.stringify(requiredConfig()));
 		const backend = new AdvancingMemoryBackend();
 		const initial = {
-			...snapshot([{ path: "settings.json", content: Buffer.from('{"initial":true}\n') }]),
+			...snapshot([
+				{ path: "settings.json", content: Buffer.from('{"initial":true}\n') },
+			]),
 			id: "initial",
 		};
 		await backend.publishSnapshot(initial, { kind: "missing" });
@@ -277,7 +392,12 @@ test("forced fake-backend push re-reads the head and preserves newly observed un
 		});
 		const { ctx } = createMockContext({ hasUI: true });
 
-		await push(ctx, { ...commandOptions(), force: true }, undefined, () => backend);
+		await push(
+			ctx,
+			{ ...commandOptions(), force: true },
+			undefined,
+			() => backend,
+		);
 
 		assert.ok(backend.readCount >= 2);
 		const head = await backend.readHead();
@@ -300,7 +420,11 @@ class StateBreakingBackend extends MemorySyncBackend {
 		expected: Parameters<MemorySyncBackend["publishSnapshot"]>[1],
 		options?: Parameters<MemorySyncBackend["publishSnapshot"]>[2],
 	) {
-		const result = await super.publishSnapshot(snapshotValue, expected, options);
+		const result = await super.publishSnapshot(
+			snapshotValue,
+			expected,
+			options,
+		);
 		mkdirSync(this.statePath, { recursive: true });
 		return result;
 	}
@@ -338,16 +462,18 @@ class AdvancingMemoryBackend extends MemorySyncBackend {
 		this.readCount += 1;
 		if (this.readCount === 2 && this.advanced) {
 			const current = await super.readHead(signal);
-			await super.publishSnapshot(this.advanced, expectedRemoteHead(current), { signal });
+			await super.publishSnapshot(this.advanced, expectedRemoteHead(current), {
+				signal,
+			});
 			this.advanced = undefined;
 		}
 		return super.readHead(signal);
 	}
 }
 
-function v3SettingsWithBucket(bucket: string) {
+function v3SettingsWithBranch(branch: string) {
 	const settings = requiredConfig();
-	settings.syncSetups.home.storage.bucket = bucket;
+	settings.syncSetups.home.storage.branch = branch;
 	return settings;
 }
 

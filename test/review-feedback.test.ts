@@ -3,30 +3,34 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { test } from "vitest";
 import { createMockContext } from "../../../test/support.js";
 import {
+	addSyncSetup,
 	loadConfig,
 	localConfigPath,
 	readLocalConfigObject,
 	updateLocalConfig,
-} from "../src/config.js";
-import { showSyncManager } from "../src/manager-ui.js";
-import {
-	addSyncSetup,
 	updateStorageConnection,
 	updateSyncSetup,
-} from "../src/settings-management.js";
+} from "../src/config.js";
+import { showSyncManager } from "../src/manager-ui.js";
 import { errorMessage, redact } from "../src/sync-format.js";
-import { v3S3Settings, withTempHome } from "./helpers.js";
+import { v3GitSettings, withTempHome } from "./helpers.js";
 
 test("shared connection edits reject a stale dependent-setup preview", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		await addSyncSetup("work", {
-			storage: { connection: "r2", bucket: "pi-sync-test", path: "pi-sync/work" },
+			storage: {
+				connection: "origin",
+				branch: "work",
+				path: "pi-sync/work",
+			},
 			sync: { include: ["settings.json"], automatic: false },
 		});
 		await assert.rejects(
-			updateStorageConnection("r2", (value) => value, ["home"]),
+			updateStorageConnection("origin", (value) => value, ["home"]),
 			/usage changed/u,
 		);
 	});
@@ -35,12 +39,18 @@ test("shared connection edits reject a stale dependent-setup preview", async () 
 test("setup edits are validated as one complete document before publication", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(v3S3Settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
+			mode: 0o600,
+		});
 		const before = readFileSync(localConfigPath());
 		await assert.rejects(
 			updateSyncSetup("home", (setup) => ({
 				...setup,
-				storage: { connection: "r2", bucket: "pi-sync-test", path: "../escape" },
+				storage: {
+					connection: "origin",
+					branch: "main",
+					path: "../escape",
+				},
 			})),
 			/safe relative path/u,
 		);
@@ -48,15 +58,13 @@ test("setup edits are validated as one complete document before publication", as
 	});
 });
 
-test("S3 setup edit rejects coordinates changed while its review is open", async () => {
+test("Git setup edit rejects coordinates changed while its review is open", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const settings = v3S3Settings();
+		const settings = v3GitSettings();
 		(settings.storageConnections as Record<string, unknown>).secondary = {
-			type: "s3",
-			endpoint: "https://secondary.example.com",
-			region: "us-east-1",
-			credentials: { accessKeyId: "secondary", secretAccessKey: "secondary-secret" },
+			type: "git",
+			remote: "git@github.com:example/secondary.git",
 		};
 		writeFileSync(localConfigPath(), JSON.stringify(settings), { mode: 0o600 });
 		const choices = [
@@ -69,14 +77,14 @@ test("S3 setup edit rejects coordinates changed while its review is open", async
 			"Back",
 			undefined,
 		];
-		const inputs = ["reviewed-bucket", "reviewed/path"];
+		const inputs = ["reviewed-branch", "reviewed/path"];
 		let rebound = false;
 		const { ctx, notifications } = createMockContext({
 			hasUI: true,
 			mode: "tui",
 			input: async () => inputs.shift(),
 			select: async (title: string) => {
-				if (title.startsWith("Review sync setup")) {
+				if (title.includes("Review")) {
 					rebound = true;
 					await updateLocalConfig((current) => ({
 						...current,
@@ -86,7 +94,7 @@ test("S3 setup edit rejects coordinates changed while its review is open", async
 								...current.syncSetups.home,
 								storage: {
 									connection: "secondary",
-									bucket: "rebound-bucket",
+									branch: "rebound-branch",
 									path: "rebound/path",
 								},
 							},
@@ -99,7 +107,10 @@ test("S3 setup edit rejects coordinates changed while its review is open", async
 		});
 		await showSyncManager(ctx, async () => undefined);
 		assert.equal(rebound, true);
-		assert.match(notifications.at(-1)?.message ?? "", /changed while it was open/u);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/changed while it was open/u,
+		);
 		const config = await loadConfig();
 		assert.equal(config.connectionName, "secondary");
 		assert.equal(config.storagePath, "rebound/path");
@@ -109,10 +120,14 @@ test("S3 setup edit rejects coordinates changed while its review is open", async
 test("setup switch rejects a destination changed while its review is open", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const settings = v3S3Settings();
+		const settings = v3GitSettings();
 		settings.onSwitch = "switch-only";
 		(settings.syncSetups as Record<string, unknown>).work = {
-			storage: { connection: "r2", bucket: "pi-sync-test", path: "pi-sync/work" },
+			storage: {
+				connection: "origin",
+				branch: "work",
+				path: "pi-sync/work",
+			},
 			sync: { include: ["settings.json"], automatic: false },
 		};
 		writeFileSync(localConfigPath(), JSON.stringify(settings), { mode: 0o600 });
@@ -137,8 +152,8 @@ test("setup switch rejects a destination changed while its review is open", asyn
 						work: {
 							...current.syncSetups.work,
 							storage: {
-								connection: "r2",
-								bucket: "pi-sync-test",
+								connection: "origin",
+								branch: "work",
 								path: "changed/work",
 							},
 						},
@@ -149,15 +164,19 @@ test("setup switch rejects a destination changed while its review is open", asyn
 		});
 		await showSyncManager(ctx, async () => undefined);
 		assert.equal((await readLocalConfigObject())?.activeSyncSetup, "home");
-		assert.match(notifications.at(-1)?.message ?? "", /changed while.*preview/u);
+		assert.match(
+			notifications.at(-1)?.message ?? "",
+			/changed while.*preview/u,
+		);
 	});
 });
 
 test("credential-bearing validation errors and formatting redact exact secrets", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const settings = v3S3Settings();
-		settings.storageConnections.r2.endpoint = "https://user:private-secret@example.com";
+		const settings = v3GitSettings();
+		settings.storageConnections.origin.remote =
+			"https://user:private-secret@example.com/repo.git";
 		writeFileSync(localConfigPath(), JSON.stringify(settings), { mode: 0o600 });
 		await assert.rejects(loadConfig(), (error: unknown) => {
 			assert.doesNotMatch(errorMessage(error), /private-secret/u);
@@ -170,7 +189,7 @@ test("credential-bearing validation errors and formatting redact exact secrets",
 test("non-TUI invalid setup feedback is observable and secret-free", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		const settings = v3S3Settings();
+		const settings = v3GitSettings();
 		settings.syncSetups.home.storage.path = "../bad";
 		writeFileSync(localConfigPath(), JSON.stringify(settings), { mode: 0o600 });
 		const { notifications } = createMockContext({ hasUI: true });
@@ -180,9 +199,15 @@ test("non-TUI invalid setup feedback is observable and secret-free", async () =>
 		} catch (error) {
 			validationError = error;
 		}
-		notifications.push({ message: errorMessage(validationError), level: "error" });
+		notifications.push({
+			message: errorMessage(validationError),
+			level: "error",
+		});
 		assert.match(notifications.at(-1)?.message ?? "", /safe relative path/u);
 		assert.doesNotMatch(notifications.at(-1)?.message ?? "", /secret-key/u);
-		assert.equal(await readLocalConfigObject().catch(() => undefined), undefined);
+		assert.equal(
+			await readLocalConfigObject().catch(() => undefined),
+			undefined,
+		);
 	});
 });

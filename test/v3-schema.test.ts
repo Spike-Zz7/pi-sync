@@ -11,81 +11,93 @@ import {
 	readLocalConfigObject,
 	validateSettingsDocument,
 } from "../src/config.js";
-import { BUILT_IN_SYNC_ROOTS, isSafeCustomIncludePath } from "../src/sync-policy.js";
+import {
+	BUILT_IN_SYNC_ROOTS,
+	isSafeCustomIncludePath,
+} from "../src/sync-policy.js";
 import { withTempHome } from "./helpers.js";
 
-function connection(type: "s3" | "git" | "webdav") {
-	if (type === "git") return { type, remote: "git@github.com:user/pi-sync.git" };
-	if (type === "webdav") {
-		return {
-			type,
-			url: "https://cloud.example.com/remote.php/dav/files/user",
-			credentials: { username: "user", password: "webdav-secret" },
-		};
-	}
+function connection() {
+	return { type: "git" as const, remote: "git@github.com:user/pi-sync.git" };
+}
+
+function setup(name = "store") {
 	return {
-		type,
-		endpoint: "https://example.r2.cloudflarestorage.com",
-		region: "auto",
-		credentials: { accessKeyId: "access", secretAccessKey: "s3-secret" },
+		storage: {
+			connection: name,
+			branch: "pi-sync/home",
+			path: "pi-sync/home",
+		},
+		sync: {
+			include: ["settings.json", "AGENTS.md", "sessions"],
+			automatic: true,
+		},
 	};
 }
 
-function setup(type: "s3" | "git" | "webdav", name = "store") {
-	const storage =
-		type === "s3"
-			? { connection: name, bucket: "pi-sync", path: "pi-sync/home" }
-			: type === "git"
-				? { connection: name, branch: "pi-sync/home", path: "pi-sync/home" }
-				: { connection: name, path: "pi-sync/home" };
-	return {
-		storage,
-		sync: { include: ["settings.json", "AGENTS.md", "sessions"], automatic: true },
-	};
-}
-
-function settings(type: "s3" | "git" | "webdav") {
+function settings() {
 	return {
 		version: 3,
 		activeSyncSetup: "home",
-		onSwitch: "ask-before-pull",
-		storageConnections: { store: connection(type) },
-		syncSetups: { home: setup(type) },
+		onSwitch: "ask-before-pull" as const,
+		storageConnections: { store: connection() },
+		syncSetups: { home: setup() },
 	};
 }
 
 async function writeSettings(agentDir: string, value: unknown) {
 	assert.equal(localConfigPath(), path.join(agentDir, "pi-sync.json"));
 	await mkdir(agentDir, { recursive: true });
-	await writeFile(path.join(agentDir, "pi-sync.json"), `${JSON.stringify(value, null, "\t")}\n`, {
-		mode: 0o600,
-	});
+	await writeFile(
+		path.join(agentDir, "pi-sync.json"),
+		`${JSON.stringify(value, null, "\t")}\n`,
+		{
+			mode: 0o600,
+		},
+	);
 }
 
-test("version 3 resolves exhaustive S3, Git, and WebDAV setup shapes", async () => {
-	for (const type of ["s3", "git", "webdav"] as const) {
-		await withTempHome(async (agentDir) => {
-			await writeSettings(agentDir, settings(type));
-			const config = await loadConfig();
-			assert.equal(config.setupName, "home");
-			assert.equal(config.connectionName, "store");
-			assert.equal(config.backend.type, type);
-			assert.deepEqual(config.include, ["settings.json", "AGENTS.md", "sessions"]);
-			assert.equal(config.automatic, true);
-			assert.equal(config.skipSecretScan, false);
-			assert.equal(config.storagePath, "pi-sync/home");
-		});
+test("version 3 resolves Git setup shape", async () => {
+	await withTempHome(async (agentDir) => {
+		await writeSettings(agentDir, settings());
+		const config = await loadConfig();
+		assert.equal(config.setupName, "home");
+		assert.equal(config.connectionName, "store");
+		assert.equal(config.backend.type, "git");
+		assert.deepEqual(config.include, [
+			"settings.json",
+			"AGENTS.md",
+			"sessions",
+		]);
+		assert.equal(config.automatic, true);
+		assert.equal(config.skipSecretScan, false);
+		assert.equal(config.storagePath, "pi-sync/home");
+	});
+});
+
+test("version 3 rejects non-Git storage connection types", () => {
+	for (const unsupportedType of ["custom", "unsupported"]) {
+		const doc = settings();
+		(doc.storageConnections.store as Record<string, unknown>).type =
+			unsupportedType;
+		assert.throws(
+			() => effectiveValidated(doc),
+			/unsupported type.*Only Git is supported/u,
+		);
 	}
 });
 
 test("version 3 validates the optional global secret-scan override", () => {
-	const enabled = settings("s3") as ReturnType<typeof settings> & {
+	const enabled = settings() as ReturnType<typeof settings> & {
 		skipSecretScan?: unknown;
 	};
 	enabled.skipSecretScan = true;
 	assert.equal(effectiveValidated(enabled), enabled);
 	enabled.skipSecretScan = "true";
-	assert.throws(() => effectiveValidated(enabled), /skipSecretScan must be boolean/u);
+	assert.throws(
+		() => effectiveValidated(enabled),
+		/skipSecretScan must be boolean/u,
+	);
 });
 
 test("version 3 accepts an empty catalog only without an active setup", async () => {
@@ -104,11 +116,14 @@ test("version 3 accepts an empty catalog only without an active setup", async ()
 });
 
 test("version 3 rejects whitespace-normalized setup references", () => {
-	const active = settings("s3");
+	const active = settings();
 	active.activeSyncSetup = " home ";
-	assert.throws(() => effectiveValidated(active), /activeSyncSetup.*whitespace/u);
+	assert.throws(
+		() => effectiveValidated(active),
+		/activeSyncSetup.*whitespace/u,
+	);
 
-	const connectionReference = settings("s3");
+	const connectionReference = settings();
 	connectionReference.syncSetups.home.storage.connection = " store ";
 	assert.throws(
 		() => effectiveValidated(connectionReference),
@@ -118,12 +133,12 @@ test("version 3 rejects whitespace-normalized setup references", () => {
 
 test("version 3 rejects missing references and backend-field mixing", async () => {
 	await withTempHome(async (agentDir) => {
-		const missing = settings("s3");
+		const missing = settings();
 		missing.syncSetups.home.storage.connection = "missing";
 		await writeSettings(agentDir, missing);
 		await assert.rejects(loadConfig(), /missing storage connection/u);
 
-		const mixed = settings("git") as ReturnType<typeof settings> & {
+		const mixed = settings() as ReturnType<typeof settings> & {
 			syncSetups: { home: { storage: Record<string, unknown> } };
 		};
 		mixed.syncSetups.home.storage.bucket = "wrong";
@@ -138,9 +153,20 @@ test("built-in sync roots stay canonical and cannot become custom paths", () => 
 		assert.deepEqual(normalizeSyncInclude([caseVariant]), [root]);
 		assert.equal(isSafeCustomIncludePath(root), false, root);
 		assert.equal(isSafeCustomIncludePath(caseVariant), false, caseVariant);
-		assert.equal(isSafeCustomIncludePath(`${root}/child`), false, `${root}/child`);
-		assert.throws(() => normalizeSyncInclude([`${root}/child`]), /canonical .* root/u);
-		assert.equal(isSafeCustomIncludePath(`${root}.backup`), true, `${root}.backup`);
+		assert.equal(
+			isSafeCustomIncludePath(`${root}/child`),
+			false,
+			`${root}/child`,
+		);
+		assert.throws(
+			() => normalizeSyncInclude([`${root}/child`]),
+			/canonical .* root/u,
+		);
+		assert.equal(
+			isSafeCustomIncludePath(`${root}.backup`),
+			true,
+			`${root}.backup`,
+		);
 	}
 	assert.equal(isSafeCustomIncludePath("custom.json"), true);
 	assert.equal(isSafeCustomIncludePath("custom"), true);
@@ -148,35 +174,52 @@ test("built-in sync roots stay canonical and cannot become custom paths", () => 
 
 test("version 3 rejects reserved names, duplicate remotes, and invalid include values", async () => {
 	await withTempHome(async (agentDir) => {
-		const reserved = JSON.parse(JSON.stringify(settings("s3"))) as Record<string, unknown>;
+		const reserved = JSON.parse(JSON.stringify(settings())) as Record<
+			string,
+			unknown
+		>;
 		reserved.storageConnections = JSON.parse(
-			`{"__proto__":${JSON.stringify(connection("s3"))}}`,
+			`{"__proto__":${JSON.stringify(connection())}}`,
 		) as Record<string, unknown>;
 		await writeSettings(agentDir, reserved);
-		await assert.rejects(readLocalConfigObject(), /invalid storage connection name/u);
+		await assert.rejects(
+			readLocalConfigObject(),
+			/invalid storage connection name/u,
+		);
 
-		for (const type of ["s3", "git", "webdav"] as const) {
-			const duplicate = settings(type);
-			(duplicate.syncSetups as Record<string, ReturnType<typeof setup>>).backup = setup(type);
-			await writeSettings(agentDir, duplicate);
-			await assert.rejects(
-				readLocalConfigObject(),
-				/same normalized remote location/u,
-				`${type} duplicate`,
-			);
-		}
+		const duplicate = settings();
+		(duplicate.syncSetups as Record<string, ReturnType<typeof setup>>).backup =
+			setup();
+		await writeSettings(agentDir, duplicate);
+		await assert.rejects(
+			readLocalConfigObject(),
+			/same normalized remote location/u,
+		);
 
-		assert.throws(() => normalizeSyncInclude(["settings.json", "SETTINGS.JSON"]), /duplicate/u);
-		assert.throws(() => normalizeSyncInclude(["../secrets"]), /safe agent-relative path/u);
-		assert.throws(() => normalizeSyncInclude(["custom", "custom/file.md"]), /overlapping/u);
-		assert.throws(() => normalizeSyncInclude(["pi-sync.json"]), /cannot be synced/u);
+		assert.throws(
+			() => normalizeSyncInclude(["settings.json", "SETTINGS.JSON"]),
+			/duplicate/u,
+		);
+		assert.throws(
+			() => normalizeSyncInclude(["../secrets"]),
+			/safe agent-relative path/u,
+		);
+		assert.throws(
+			() => normalizeSyncInclude(["custom", "custom/file.md"]),
+			/overlapping/u,
+		);
+		assert.throws(
+			() => normalizeSyncInclude(["pi-sync.json"]),
+			/cannot be synced/u,
+		);
 		assert.deepEqual(normalizeSyncInclude([]), []);
 	});
 });
 
 test("version 3 rejects recognized version 1/2 fields without rejecting unknown future fields", () => {
 	for (const mutate of [
-		(value: ReturnType<typeof settings>) => Object.assign(value, { profiles: {} }),
+		(value: ReturnType<typeof settings>) =>
+			Object.assign(value, { profiles: {} }),
 		(value: ReturnType<typeof settings>) =>
 			Object.assign(value.storageConnections.store, { accessKeyId: "legacy" }),
 		(value: ReturnType<typeof settings>) =>
@@ -184,94 +227,74 @@ test("version 3 rejects recognized version 1/2 fields without rejecting unknown 
 		(value: ReturnType<typeof settings>) =>
 			Object.assign(value.syncSetups.home.storage, { namespace: "legacy" }),
 	]) {
-		const value = settings("s3");
+		const value = settings();
 		mutate(value);
-		assert.throws(() => effectiveValidated(value), /unsupported version 1\/2 field/u);
+		assert.throws(
+			() => effectiveValidated(value),
+			/unsupported version 1\/2 field/u,
+		);
 	}
-	const future = settings("s3") as ReturnType<typeof settings> & { futureTop?: unknown };
+	const future = settings() as ReturnType<typeof settings> & {
+		futureTop?: unknown;
+	};
 	future.futureTop = { retained: true };
 	assert.equal(effectiveValidated(future), future);
 });
 
 test("every documented connection and setup field is required", () => {
-	for (const [type, mutations] of [
-		[
-			"s3",
-			[
-				(value: Record<string, unknown>) => delete value.endpoint,
-				(value: Record<string, unknown>) => delete value.region,
-				(value: Record<string, unknown>) => delete value.credentials,
-			],
-		],
-		["git", [(value: Record<string, unknown>) => delete value.remote]],
-		[
-			"webdav",
-			[
-				(value: Record<string, unknown>) => delete value.url,
-				(value: Record<string, unknown>) => delete value.credentials,
-			],
-		],
-	] as const) {
-		for (const mutate of mutations) {
-			const value = settings(type);
-			mutate(value.storageConnections.store as Record<string, unknown>);
-			assert.throws(
-				() => effectiveValidated(value),
-				/required|must be|credentials/u,
-				`${type} missing field`,
-			);
-		}
-	}
+	const mutateRemote = (value: Record<string, unknown>) => delete value.remote;
+	const val = settings();
+	mutateRemote(val.storageConnections.store as Record<string, unknown>);
+	assert.throws(
+		() => effectiveValidated(val),
+		/required|must be/u,
+		"git missing remote",
+	);
 
 	for (const mutate of [
 		(value: ReturnType<typeof settings>) =>
-			delete (value.syncSetups.home as Partial<ReturnType<typeof setup>>).storage,
+			delete (value.syncSetups.home as Partial<ReturnType<typeof setup>>)
+				.storage,
 		(value: ReturnType<typeof settings>) =>
 			delete (value.syncSetups.home as Partial<ReturnType<typeof setup>>).sync,
 		(value: ReturnType<typeof settings>) =>
 			delete (value.syncSetups.home.storage as { path?: string }).path,
 		(value: ReturnType<typeof settings>) =>
+			delete (value.syncSetups.home.storage as { branch?: string }).branch,
+		(value: ReturnType<typeof settings>) =>
 			delete (value.syncSetups.home.sync as { include?: string[] }).include,
 		(value: ReturnType<typeof settings>) =>
 			delete (value.syncSetups.home.sync as { automatic?: boolean }).automatic,
 	]) {
-		const value = settings("s3");
+		const value = settings();
 		mutate(value);
-		assert.throws(() => effectiveValidated(value), /must be|missing|safe relative path/u);
+		assert.throws(
+			() => effectiveValidated(value),
+			/must be|missing|safe relative path/u,
+		);
 	}
 });
 
 test("credentials and own-property references fail closed", () => {
-	const malformedS3 = settings("s3");
-	malformedS3.storageConnections.store.credentials = {
-		accessKeyId: "access",
-		secretAccessKey: "",
-	};
-	assert.throws(() => effectiveValidated(malformedS3), /secret access key.*configured/u);
+	const secretGit = settings();
+	secretGit.storageConnections.store.remote =
+		"https://user:secret@example.com/repo.git";
+	assert.throws(
+		() => effectiveValidated(secretGit),
+		/userinfo are not allowed/u,
+	);
 
-	const malformedWebDav = settings("webdav");
-	malformedWebDav.storageConnections.store.credentials = {
-		username: "bad:user",
-		password: "secret",
-	};
-	assert.throws(() => effectiveValidated(malformedWebDav), /credentials/u);
-
-	const secretGit = settings("git");
-	secretGit.storageConnections.store.remote = "https://user:secret@example.com/repo.git";
-	assert.throws(() => effectiveValidated(secretGit), /userinfo are not allowed/u);
-
-	const badActive = settings("s3");
+	const badActive = settings();
 	badActive.activeSyncSetup = "constructor";
 	assert.throws(() => effectiveValidated(badActive), /activeSyncSetup/u);
 });
 
 function effectiveValidated(value: ReturnType<typeof settings>) {
-	// The public validator is deliberately exercised without touching disk for required-field tables.
 	return validateSettingsDocument(value as unknown as Record<string, unknown>);
 }
 
 test("remote identity uses normalized reviewed coordinates and not the setup name", () => {
-	const document = settings("s3");
+	const document = settings();
 	const first = effectiveSyncSetupRemoteIdentity(
 		document.syncSetups.home,
 		document.storageConnections.store,
@@ -281,11 +304,14 @@ test("remote identity uses normalized reviewed coordinates and not the setup nam
 		document.storageConnections.store,
 	);
 	assert.equal(first, renamed);
-	const equivalent = setup("s3");
+	const equivalent = setup();
 	equivalent.storage.path = "/pi-sync/home/";
 	assert.equal(
 		first,
-		effectiveSyncSetupRemoteIdentity(equivalent, document.storageConnections.store),
+		effectiveSyncSetupRemoteIdentity(
+			equivalent,
+			document.storageConnections.store,
+		),
 	);
 });
 

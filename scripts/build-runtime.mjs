@@ -1,7 +1,16 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { access, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm } from "node:fs/promises";
+import {
+	access,
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	realpath,
+	rename,
+	rm,
+} from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
@@ -20,11 +29,9 @@ const FORBIDDEN_EAGER_INPUTS = [
 	"src/manager-result-dispatcher.ts",
 	"src/file-selection.ts",
 	"src/remote-selection-ui.ts",
-	"src/s3-backend.ts",
-	"src/webdav-backend.ts",
 	"src/git-backend.ts",
 ];
-const FORBIDDEN_EAGER_EXTERNALS = ["@narumitw/pi-tui-kit", "fast-xml-parser"];
+const FORBIDDEN_EAGER_EXTERNALS = ["@narumitw/pi-tui-kit"];
 
 export async function buildRuntime({
 	outputDirectory = distDirectory,
@@ -33,7 +40,9 @@ export async function buildRuntime({
 	const resolvedOutputDirectory = resolve(outputDirectory);
 	await assertSafeOutputDirectory(resolvedOutputDirectory);
 	await mkdir(dirname(resolvedOutputDirectory), { recursive: true });
-	const stagingDirectory = await mkdtemp(join(dirname(resolvedOutputDirectory), ".pi-sync-dist-"));
+	const stagingDirectory = await mkdtemp(
+		join(dirname(resolvedOutputDirectory), ".pi-sync-dist-"),
+	);
 
 	try {
 		const result = await build({
@@ -70,7 +79,10 @@ export function validateEagerGraph(metadata) {
 	const entry = Object.entries(outputs).find(([, output]) =>
 		normalizePath(output.entryPoint ?? "").endsWith("/src/index.ts"),
 	);
-	if (!entry) throw new Error("Generated runtime metadata has no src/index.ts entrypoint");
+	if (!entry)
+		throw new Error(
+			"Generated runtime metadata has no src/index.ts entrypoint",
+		);
 
 	for (const output of Object.values(outputs)) {
 		for (const inputPath of Object.keys(output.inputs ?? {})) {
@@ -94,7 +106,8 @@ export function validateEagerGraph(metadata) {
 				imported.external &&
 				FORBIDDEN_EAGER_EXTERNALS.some(
 					(dependency) =>
-						imported.path === dependency || imported.path.startsWith(`${dependency}/`),
+						imported.path === dependency ||
+						imported.path.startsWith(`${dependency}/`),
 				)
 			) {
 				throw new Error(
@@ -128,10 +141,14 @@ export async function validateGeneratedFiles(outputDirectory) {
 			throw new Error(`Generated marker is missing from ${runtimePath}`);
 		}
 		if (/["']\.\.?\/[^"']+\.js["']/u.test(source)) {
-			throw new Error(`Generated runtime retains a .js import specifier in ${runtimePath}`);
+			throw new Error(
+				`Generated runtime retains a .js import specifier in ${runtimePath}`,
+			);
 		}
 		if (/["']\.\.?\/[^"']*src\//u.test(source)) {
-			throw new Error(`Generated runtime imports authoritative source from ${runtimePath}`);
+			throw new Error(
+				`Generated runtime imports authoritative source from ${runtimePath}`,
+			);
 		}
 		if (!files.includes(`${runtimePath}.map`)) {
 			throw new Error(`Source map is missing for ${runtimePath}`);
@@ -164,7 +181,9 @@ async function assertSafeOutputDirectory(outputDirectory) {
 		relativeParent.startsWith(`..${sep}`) ||
 		isAbsolute(relativeParent)
 	) {
-		throw new Error("Runtime output parent must not escape the package root through a symlink");
+		throw new Error(
+			"Runtime output parent must not escape the package root through a symlink",
+		);
 	}
 }
 
@@ -196,7 +215,8 @@ async function publishRuntime(stagingDirectory, outputDirectory) {
 		}
 		throw error;
 	}
-	if (hadPreviousOutput) await rm(backupDirectory, { force: true, recursive: true });
+	if (hadPreviousOutput)
+		await rm(backupDirectory, { force: true, recursive: true });
 }
 
 async function exists(path) {
@@ -210,9 +230,12 @@ async function exists(path) {
 
 async function listFiles(directory, prefix = "") {
 	const files = [];
-	for (const entry of await readdir(join(directory, prefix), { withFileTypes: true })) {
+	for (const entry of await readdir(join(directory, prefix), {
+		withFileTypes: true,
+	})) {
 		const relativePath = join(prefix, entry.name);
-		if (entry.isDirectory()) files.push(...(await listFiles(directory, relativePath)));
+		if (entry.isDirectory())
+			files.push(...(await listFiles(directory, relativePath)));
 		else if (entry.isFile()) files.push(relativePath.replaceAll("\\", "/"));
 	}
 	return files.sort();
@@ -224,5 +247,7 @@ function normalizePath(path) {
 	return `/${relative(packageRoot, path).replaceAll("\\", "/")}`;
 }
 
-const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : undefined;
+const invokedPath = process.argv[1]
+	? pathToFileURL(resolve(process.argv[1])).href
+	: undefined;
 if (invokedPath === import.meta.url) await buildRuntime();

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { initTheme, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import {
+	initTheme,
+	type KeybindingsManager,
+} from "@earendil-works/pi-coding-agent";
 import { createTuiHarness } from "@narumitw/pi-tui-kit/testing";
 import { test } from "vitest";
 import { createMockContext } from "../../../test/support.js";
@@ -13,10 +16,16 @@ initTheme("dark", false);
 test("session replacement aborts and drains an active custom operation", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(settings()), {
+			mode: 0o600,
+		});
 		const owner = new AbortController();
 		const tui = createTuiHarness({ width: 48, rows: 16 });
-		const { ctx } = createMockContext({ hasUI: true, mode: "tui", custom: tui.custom });
+		const { ctx } = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			custom: tui.custom,
+		});
 		let routeSignal: AbortSignal | undefined;
 		let reportRouteStarted: () => void = () => undefined;
 		const routeStarted = new Promise<void>((resolve) => {
@@ -65,9 +74,15 @@ test("session replacement aborts and drains an active custom operation", async (
 test("external disposal aborts and drains an active custom operation", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(settings()), {
+			mode: 0o600,
+		});
 		const tui = createTuiHarness({ width: 48, rows: 16 });
-		const { ctx } = createMockContext({ hasUI: true, mode: "tui", custom: tui.custom });
+		const { ctx } = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			custom: tui.custom,
+		});
 		let routeSignal: AbortSignal | undefined;
 		let reportRouteStarted: () => void = () => undefined;
 		const routeStarted = new Promise<void>((resolve) => {
@@ -109,7 +124,9 @@ test.each([
 	async (_name, input) => {
 		await withTempHome(async (agentDir) => {
 			mkdirSync(agentDir, { recursive: true });
-			writeFileSync(localConfigPath(), JSON.stringify(settings()), { mode: 0o600 });
+			writeFileSync(localConfigPath(), JSON.stringify(settings()), {
+				mode: 0o600,
+			});
 			const tui = createTuiHarness({
 				width: 48,
 				rows: 16,
@@ -170,7 +187,9 @@ test.each([
 test("commit-aware hard cancellation stays open until the active operation settles", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(localConfigPath(), JSON.stringify(settings()), { mode: 0o600 });
+		writeFileSync(localConfigPath(), JSON.stringify(settings()), {
+			mode: 0o600,
+		});
 		const tui = createTuiHarness({
 			width: 48,
 			rows: 16,
@@ -211,7 +230,10 @@ test("commit-aware hard cancellation stays open until the active operation settl
 		tui.press("ctrl+c");
 		try {
 			assert.equal(routeSignal?.aborted, false);
-			assert.match(notifications.at(-1)?.message ?? "", /cannot be cancelled safely/u);
+			assert.match(
+				notifications.at(-1)?.message ?? "",
+				/cannot be cancelled safely/u,
+			);
 			const loaderOpenCount = tui.openCount;
 			releaseRoute();
 			await closeReturnedMenu(tui, loaderOpenCount, () => managerSettled);
@@ -223,7 +245,10 @@ test("commit-aware hard cancellation stays open until the active operation settl
 	});
 });
 
-function remappedCancelKeybindings(): Pick<KeybindingsManager, "matches" | "getKeys"> {
+function remappedCancelKeybindings(): Pick<
+	KeybindingsManager,
+	"matches" | "getKeys"
+> {
 	return {
 		matches(data, binding) {
 			if (binding === "tui.select.cancel") return data === "q";
@@ -234,7 +259,8 @@ function remappedCancelKeybindings(): Pick<KeybindingsManager, "matches" | "getK
 		},
 		getKeys(binding) {
 			if (binding === "tui.select.cancel") return ["q"];
-			if (binding === "tui.select.confirm" || binding === "tui.input.submit") return ["enter"];
+			if (binding === "tui.select.confirm" || binding === "tui.input.submit")
+				return ["enter"];
 			return [];
 		},
 	};
@@ -250,7 +276,11 @@ function settings() {
 		},
 		syncSetups: {
 			home: {
-				storage: { connection: "origin", branch: "pi-sync/home", path: "pi-sync/home" },
+				storage: {
+					connection: "origin",
+					branch: "pi-sync/home",
+					path: "pi-sync/home",
+				},
 				sync: { include: ["settings.json"], automatic: true },
 			},
 		},

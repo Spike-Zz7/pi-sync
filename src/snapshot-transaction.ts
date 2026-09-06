@@ -3,8 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { agentDir, stateDir } from "./config.js";
 import { withLock } from "./lock.js";
-import { assertWithinRoot, isPathInside } from "./paths.js";
-import { sessionStorageRoot } from "./snapshot-paths.js";
+import { assertWithinRoot, isPathInside, sessionStorageRoot } from "./paths.js";
 import type { SnapshotApplyPlan } from "./types.js";
 
 const JOURNAL_VERSION = 1;
@@ -14,6 +13,7 @@ interface TransactionEntry {
 	backupName: string;
 	kind: "missing" | "file" | "directory" | "symlink";
 	linkTarget?: string;
+	mode?: number;
 }
 
 interface TransactionJournal {
@@ -25,7 +25,10 @@ interface TransactionJournal {
 
 export async function applySnapshotTransaction(
 	plan: SnapshotApplyPlan,
-	options: { sessionDir?: string } = {},
+	options: {
+		sessionDir?: string;
+		beforeWrite?: (target: string) => Promise<void>;
+	} = {},
 ) {
 	await recoverPendingSnapshotTransactions();
 	const transaction = await prepareTransaction(plan, options.sessionDir);
@@ -34,6 +37,7 @@ export async function applySnapshotTransaction(
 			await fs.rm(target, { force: true, recursive: true });
 		}
 		for (const item of plan.writes) {
+			await options.beforeWrite?.(item.target);
 			await fs.mkdir(path.dirname(item.target), { recursive: true });
 			await fs.writeFile(item.target, item.content);
 		}
@@ -52,28 +56,38 @@ export async function applySnapshotTransaction(
 }
 
 export async function recoverSnapshotTransactionsOnStartup() {
-	if (!(await pendingTransactionEntries()).some((entry) => entry.isDirectory())) return;
-	await withLock("recovery", recoverPendingSnapshotTransactions, { reclaimStale: true });
+	if (!(await pendingTransactionEntries()).some((entry) => entry.isDirectory()))
+		return;
+	await withLock("recovery", recoverPendingSnapshotTransactions, {
+		reclaimStale: true,
+	});
 }
 
 export async function recoverPendingSnapshotTransactions() {
 	const directory = transactionRoot();
 	const entries = await pendingTransactionEntries();
-	for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+	for (const entry of entries.sort((left, right) =>
+		left.name.localeCompare(right.name),
+	)) {
 		if (!entry.isDirectory()) continue;
 		const transactionDirectory = path.join(directory, entry.name);
 		const journalPath = path.join(transactionDirectory, "journal.json");
 		let journal: TransactionJournal;
 		try {
-			journal = JSON.parse(await fs.readFile(journalPath, "utf8")) as TransactionJournal;
+			journal = JSON.parse(
+				await fs.readFile(journalPath, "utf8"),
+			) as TransactionJournal;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 				await fs.rm(transactionDirectory, { recursive: true, force: true });
 				continue;
 			}
-			throw new Error(`Cannot recover malformed pi-sync transaction: ${journalPath}`, {
-				cause: error,
-			});
+			throw new Error(
+				`Cannot recover malformed pi-sync transaction: ${journalPath}`,
+				{
+					cause: error,
+				},
+			);
 		}
 		await restoreTransaction(transactionDirectory, journal);
 	}
@@ -88,13 +102,40 @@ async function pendingTransactionEntries() {
 	}
 }
 
-async function prepareTransaction(plan: SnapshotApplyPlan, sessionDir?: string) {
+async function prepareTransaction(
+	plan: SnapshotApplyPlan,
+	sessionDir?: string,
+) {
 	const root = path.resolve(agentDir());
-	const sessionRoot = sessionDir ? path.resolve(sessionStorageRoot(root, sessionDir)) : undefined;
+	const sessionRoot = sessionDir
+		? path.resolve(sessionStorageRoot(root, sessionDir))
+		: undefined;
 	const directory = path.join(transactionRoot(), randomUUID());
 	const backupDirectory = path.join(directory, "before");
 	await fs.mkdir(backupDirectory, { recursive: true, mode: 0o700 });
-	const targets = [...new Set([...plan.deletes, ...plan.writes.map((item) => item.target)])].sort();
+	const targetSet = new Set([
+		...plan.deletes,
+		...plan.writes.map((item) => item.target),
+	]);
+	// Journal missing parents too, so rollback removes directories created by
+	// recursive mkdir, including descendants beneath a replaced file ancestor.
+	for (const item of plan.writes) {
+		let parent = path.dirname(item.target);
+		while (parent !== root) {
+			assertAllowedTarget(root, sessionRoot, parent);
+			try {
+				await fs.lstat(parent);
+				break;
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+				targetSet.add(parent);
+			}
+			if (parent === sessionRoot) break;
+			parent = path.dirname(parent);
+		}
+	}
+	const targets = [...targetSet].sort();
 	const entries: TransactionEntry[] = [];
 	for (let index = 0; index < targets.length; index += 1) {
 		const target = targets[index];
@@ -121,7 +162,7 @@ async function prepareTransaction(plan: SnapshotApplyPlan, sessionDir?: string) 
 			} else if (stat.isFile()) {
 				await fs.copyFile(target, backupPath);
 				await fs.chmod(backupPath, stat.mode);
-				entries.push({ target, backupName, kind: "file" });
+				entries.push({ target, backupName, kind: "file", mode: stat.mode });
 			} else {
 				throw new Error(`Unsupported existing snapshot target: ${target}`);
 			}
@@ -147,20 +188,29 @@ async function prepareTransaction(plan: SnapshotApplyPlan, sessionDir?: string) 
 	return { directory, journal };
 }
 
-async function restoreTransaction(directory: string, journal: TransactionJournal) {
+async function restoreTransaction(
+	directory: string,
+	journal: TransactionJournal,
+) {
 	validateJournal(directory, journal);
 	for (const entry of [...journal.entries].sort(
 		(left, right) => right.target.length - left.target.length,
 	)) {
-		await fs.rm(entry.target, { recursive: true, force: true });
+		try {
+			await fs.rm(entry.target, { recursive: true, force: true });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOTDIR") throw error;
+		}
 	}
 	for (const entry of journal.entries) {
 		if (entry.kind === "missing") continue;
 		await fs.mkdir(path.dirname(entry.target), { recursive: true });
 		const backupPath = path.join(directory, "before", entry.backupName);
 		assertWithinRoot(directory, backupPath);
-		if (entry.kind === "file") await fs.copyFile(backupPath, entry.target);
-		else if (entry.kind === "directory") {
+		if (entry.kind === "file") {
+			await fs.copyFile(backupPath, entry.target);
+			if (entry.mode !== undefined) await fs.chmod(entry.target, entry.mode);
+		} else if (entry.kind === "directory") {
 			await fs.cp(backupPath, entry.target, {
 				recursive: true,
 				dereference: false,
@@ -179,13 +229,16 @@ function validateJournal(directory: string, journal: TransactionJournal) {
 	}
 	const expectedRoot = path.resolve(agentDir());
 	if (path.resolve(journal.root) !== expectedRoot) {
-		throw new Error(`Transaction root no longer matches the Pi agent directory: ${directory}`);
+		throw new Error(
+			`Transaction root no longer matches the Pi agent directory: ${directory}`,
+		);
 	}
 	for (const entry of journal.entries) {
 		if (
 			!entry ||
 			typeof entry.target !== "string" ||
 			typeof entry.backupName !== "string" ||
+			(entry.mode !== undefined && typeof entry.mode !== "number") ||
 			!/^\d+$/u.test(entry.backupName)
 		) {
 			throw new Error(`Invalid pi-sync transaction entry: ${directory}`);
@@ -194,7 +247,11 @@ function validateJournal(directory: string, journal: TransactionJournal) {
 	}
 }
 
-function assertAllowedTarget(root: string, sessionRoot: string | undefined, target: string) {
+function assertAllowedTarget(
+	root: string,
+	sessionRoot: string | undefined,
+	target: string,
+) {
 	const resolved = path.resolve(target);
 	if (isPathInside(root, resolved)) {
 		assertWithinRoot(root, resolved);

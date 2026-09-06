@@ -1,23 +1,43 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { normalizeGitBranch, normalizeGitDirectory, normalizeGitRemote } from "./git-config.js";
-import { requiredInput, requiredValueInput, safeTerminalText } from "./manager-helpers.js";
+import { defineMenu, runMenu } from "@narumitw/pi-tui-kit";
 import {
 	addStorageConnection,
 	addSyncSetup,
+	effectiveSyncSetupRemoteIdentity,
+	readLocalConfigObject,
+	removeStorageConnection,
 	saveNewV3Settings,
 	updateStorageConnection,
 	updateSyncSetup,
-} from "./settings-management.js";
-import { promptAvailableSetupStorage } from "./setup-location-ui.js";
-import { DEFAULT_SYNC_INCLUDE } from "./sync-policy.js";
-import type { PartialConfig } from "./types.js";
+	validateConfigName,
+} from "./config.js";
+import {
+	normalizeGitBranch,
+	normalizeGitDirectory,
+	normalizeGitRemote,
+} from "./git-config.js";
+import {
+	errorMessage,
+	ownRecord,
+	requiredInput,
+	requiredValueInput,
+	safeTerminalText,
+} from "./manager-helpers.js";
+import {
+	DEFAULT_SYNC_INCLUDE,
+	formatIncludedContentSummary,
+} from "./sync-policy.js";
+import type {
+	PartialConfig,
+	StorageConnectionSettings,
+	SyncSetupSettings,
+} from "./types.js";
 
 export async function showGitSetup(
 	ctx: ExtensionCommandContext,
 	targetName: string,
 	signal?: AbortSignal,
 ) {
-	const profileName = targetName;
 	const remoteInput = await promptGitRemote(ctx, signal);
 	if (!remoteInput) return false;
 	const destination = await promptGitDestination(ctx, signal);
@@ -33,7 +53,10 @@ export async function showGitSetup(
 	try {
 		remote = normalizeGitRemote(remoteInput);
 	} catch (error) {
-		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		ctx.ui.notify(
+			error instanceof Error ? error.message : String(error),
+			"error",
+		);
 		return false;
 	}
 	if (!remote) return false;
@@ -42,11 +65,11 @@ export async function showGitSetup(
 			"Review Git sync setup",
 			"",
 			`Sync setup: ${safeTerminalText(targetName)}`,
-			`Storage connection: ${safeTerminalText(profileName)} (Git)`,
+			`Storage connection: ${safeTerminalText(targetName)} (Git)`,
 			`Remote: ${safeGitRemote(remote)}`,
 			`Owned branch: ${safeTerminalText(destination.branch)}`,
 			`Storage location: ${safeTerminalText(destination.directory)}`,
-			`Included content: ${DEFAULT_SYNC_INCLUDE.length} built-in groups · Sessions: Off`,
+			`Included content: ${formatIncludedContentSummary(DEFAULT_SYNC_INCLUDE)}`,
 			`Automatic sync: ${automatic === "Enable automatic sync" ? "On" : "Off"}`,
 			"Authentication: existing non-interactive Git/SSH credentials; no credentials are stored by pi-sync.",
 			"The remote repository must already exist. The owned branch may be created on first push.",
@@ -59,11 +82,11 @@ export async function showGitSetup(
 	await saveNewV3Settings(
 		{
 			setupName: targetName,
-			connectionName: profileName,
+			connectionName: targetName,
 			connection: { type: "git", remote },
 			setup: {
 				storage: {
-					connection: profileName,
+					connection: targetName,
 					branch: destination.branch,
 					path: destination.directory,
 				},
@@ -83,8 +106,16 @@ export async function showGitSetup(
 	return true;
 }
 
-export async function showAddGitStorageProfile(ctx: ExtensionCommandContext, signal?: AbortSignal) {
-	const name = await requiredInput(ctx, "Name this Git storage connection", "git", signal);
+export async function showAddGitStorageProfile(
+	ctx: ExtensionCommandContext,
+	signal?: AbortSignal,
+) {
+	const name = await requiredInput(
+		ctx,
+		"Name this Git storage connection",
+		"git",
+		signal,
+	);
 	if (!name) return false;
 	const remoteInput = await promptGitRemote(ctx, signal);
 	if (!remoteInput) return false;
@@ -92,7 +123,10 @@ export async function showAddGitStorageProfile(ctx: ExtensionCommandContext, sig
 	try {
 		remote = normalizeGitRemote(remoteInput);
 	} catch (error) {
-		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		ctx.ui.notify(
+			error instanceof Error ? error.message : String(error),
+			"error",
+		);
 		return false;
 	}
 	if (!remote) return false;
@@ -105,7 +139,10 @@ export async function showAddGitStorageProfile(ctx: ExtensionCommandContext, sig
 	if (choice !== "Add storage connection") return false;
 	await addStorageConnection(name, { type: "git", remote }, signal);
 	if (signal?.aborted) return true;
-	ctx.ui.notify(`Added storage connection “${safeTerminalText(name)}”.`, "info");
+	ctx.ui.notify(
+		`Added storage connection “${safeTerminalText(name)}”.`,
+		"info",
+	);
 	return true;
 }
 
@@ -126,7 +163,10 @@ export async function showEditGitStorageProfile(
 	try {
 		remote = normalizeGitRemote(remoteInput);
 	} catch (error) {
-		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		ctx.ui.notify(
+			error instanceof Error ? error.message : String(error),
+			"error",
+		);
 		return false;
 	}
 	if (!remote) return false;
@@ -140,14 +180,18 @@ export async function showEditGitStorageProfile(
 	await updateStorageConnection(
 		name,
 		(current) => {
-			if (current.type !== "git") throw new Error("Storage connection type changed; reopen it.");
+			if (current.type !== "git")
+				throw new Error("Storage connection type changed; reopen it.");
 			return { ...current, remote };
 		},
 		affectedSetups,
 		signal,
 	);
 	if (signal?.aborted) return true;
-	ctx.ui.notify(`Saved storage connection “${safeTerminalText(name)}”.`, "info");
+	ctx.ui.notify(
+		`Saved storage connection “${safeTerminalText(name)}”.`,
+		"info",
+	);
 	return true;
 }
 
@@ -174,7 +218,9 @@ export async function showAddGitTarget(
 	throwIfAborted(signal);
 	if (!preset || preset === "Cancel") return false;
 	const syncFiles =
-		preset === "Minimal settings" ? ["settings.json", "AGENTS.md"] : [...DEFAULT_SYNC_INCLUDE];
+		preset === "Minimal settings"
+			? ["settings.json", "AGENTS.md"]
+			: [...DEFAULT_SYNC_INCLUDE];
 	const automatic = await ctx.ui.select(
 		"Automatic sync for this setup",
 		["Enable automatic sync", "Keep automatic sync off", "Cancel"],
@@ -183,7 +229,7 @@ export async function showAddGitTarget(
 	throwIfAborted(signal);
 	if (!automatic || automatic === "Cancel") return false;
 	const choice = await ctx.ui.select(
-		`Review Git sync setup\n\nSync setup: ${safeTerminalText(name)}\nStorage connection: ${safeTerminalText(profile)}\nOwned branch: ${safeTerminalText(destination.branch)}\nStorage location: ${safeTerminalText(destination.directory)}\nIncluded content: ${syncFiles.length} built-in groups · Sessions: Off\nAutomatic sync: ${automatic === "Enable automatic sync" ? "On" : "Off"}`,
+		`Review Git sync setup\n\nSync setup: ${safeTerminalText(name)}\nStorage connection: ${safeTerminalText(profile)}\nOwned branch: ${safeTerminalText(destination.branch)}\nStorage location: ${safeTerminalText(destination.directory)}\nIncluded content: ${formatIncludedContentSummary(syncFiles)}\nAutomatic sync: ${automatic === "Enable automatic sync" ? "On" : "Off"}`,
 		["Add sync setup", "Cancel"],
 		{ signal },
 	);
@@ -217,7 +263,10 @@ export async function showEditGitTarget(
 	const targetName = partial.setupName;
 	const destination = await promptGitDestination(ctx, signal, partial);
 	if (!destination) return false;
-	if (destination.directory !== partial.storagePath && destination.branch === partial.branch) {
+	if (
+		destination.directory !== partial.storagePath &&
+		destination.branch === partial.branch
+	) {
 		ctx.ui.notify(
 			"Changing a Git storage path requires a new Git branch so the existing branch remains readable.",
 			"warning",
@@ -294,7 +343,10 @@ async function promptGitDestination(
 		const directory = normalizeGitDirectory(pathInput);
 		return { branch, directory };
 	} catch (error) {
-		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		ctx.ui.notify(
+			error instanceof Error ? error.message : String(error),
+			"error",
+		);
 		return undefined;
 	}
 }
@@ -306,11 +358,266 @@ function throwIfAborted(signal?: AbortSignal) {
 		: new DOMException("The operation was aborted", "AbortError");
 }
 
-function safeGitRemote(remote: string) {
+export function safeGitRemote(remote: string) {
 	try {
 		const url = new URL(remote);
 		return safeTerminalText(`${url.protocol}//${url.host}${url.pathname}`);
 	} catch {
 		return safeTerminalText(remote);
 	}
+}
+
+export async function promptInitialSetupName(
+	ctx: ExtensionCommandContext,
+	signal?: AbortSignal,
+) {
+	while (!signal?.aborted) {
+		const hint = "For example: home or work. Leave blank for default.";
+		// Pi styles the whole input title as accent; give only the guidance a muted role.
+		const guidance = ctx.mode === "tui" ? ctx.ui.theme.fg("muted", hint) : hint;
+		// This compact prompt owns its default hint; the general helper would repeat it.
+		const value = await ctx.ui.input(
+			`Sync setup name\n${guidance}`,
+			undefined,
+			{ signal },
+		);
+		if (signal?.aborted) {
+			throw signal.reason instanceof Error
+				? signal.reason
+				: new DOMException("The operation was aborted", "AbortError");
+		}
+		if (value === undefined) return undefined;
+		const name = value.trim() || "default";
+		if (name.includes("<") || name.includes(">")) return undefined;
+		try {
+			validateConfigName(name, "sync setup");
+			return name;
+		} catch (error) {
+			ctx.ui.notify(
+				`This name cannot be used for the sync setup. ${safeTerminalText(errorMessage(error))} Enter another name (for example, default).`,
+				"warning",
+			);
+		}
+	}
+	return undefined;
+}
+
+/** Early UI check only; the settings writer still validates uniqueness under its lock. */
+export async function promptAvailableSetupStorage<
+	T extends SyncSetupSettings["storage"],
+>(
+	ctx: ExtensionCommandContext,
+	initial: T,
+	signal?: AbortSignal,
+): Promise<T | undefined> {
+	let storage = initial;
+	while (!signal?.aborted) {
+		const settings = await readLocalConfigObject();
+		if (signal?.aborted) return undefined;
+		const connection = settings?.storageConnections[storage.connection];
+		if (!settings || !connection)
+			throw new Error("Storage connection changed; reopen setup.");
+		const identity = setupPublicationIdentity(storage, connection);
+		const occupied = Object.entries(settings.syncSetups).find(
+			([, setup]) =>
+				setupPublicationIdentity(
+					setup.storage,
+					settings.storageConnections[setup.storage.connection],
+				) === identity,
+		);
+		if (!occupied) return storage;
+		const message = `Git branch is already used by “${safeTerminalText(occupied[0])}”. Use a different branch; pi-sync owns the entire branch.`;
+		ctx.ui.notify(message, "warning");
+		const title = `Git branch for the new setup\n\n${message}`;
+		const example = "pi-sync/work";
+		const value = await requiredValueInput(ctx, title, example, signal);
+		if (signal?.aborted || value === undefined) return undefined;
+		try {
+			storage = { ...storage, branch: normalizeGitBranch(value) };
+		} catch (error) {
+			ctx.ui.notify(safeTerminalText(errorMessage(error)), "warning");
+		}
+	}
+	return undefined;
+}
+
+function setupPublicationIdentity(
+	storage: SyncSetupSettings["storage"],
+	connection: StorageConnectionSettings,
+) {
+	// Git publications own a complete branch tree; changing only its directory is not isolation.
+	return effectiveSyncSetupRemoteIdentity(
+		{
+			storage: connection.type === "git" ? { ...storage, path: "./" } : storage,
+			sync: { include: [], automatic: false },
+		},
+		connection,
+	);
+}
+
+export async function showStorageConnections(
+	ctx: ExtensionCommandContext,
+	signal?: AbortSignal,
+) {
+	let selectedName: string | undefined;
+	const nameById = new Map<string, string>();
+	type Screen = "list" | "detail";
+	type Action = "add" | "select" | "edit" | "remove" | "back";
+	const menu = defineMenu<
+		Awaited<ReturnType<typeof loadStorageMenuState>>,
+		Screen,
+		Action,
+		ExtensionCommandContext
+	>({
+		start: "list",
+		screens: {
+			list: ({ state }) => {
+				nameById.clear();
+				const names = Object.keys(state.profiles).sort((a, b) =>
+					a.localeCompare(b),
+				);
+				return {
+					kind: "actions",
+					title: "Storage connections",
+					lines: state.version3
+						? []
+						: [
+								"Create version 3 settings before managing storage connections.",
+							],
+					items: state.version3
+						? [
+								{
+									id: "add",
+									label: "Add storage connection",
+									action: "add" as const,
+								},
+								...names.map((name, index) => {
+									const id = `connection:${index}`;
+									nameById.set(id, name);
+									return {
+										id,
+										label: safeTerminalText(name),
+										action: "select" as const,
+									};
+								}),
+							]
+						: [],
+					hint: "back",
+				};
+			},
+			detail: ({ state }) => ({
+				kind: "actions",
+				title: state.selected
+					? `Storage connection “${safeTerminalText(state.selected.name)}”`
+					: "Storage connection",
+				lines: state.selected?.lines ?? [
+					"This storage connection no longer exists.",
+				],
+				items: state.selected
+					? [
+							{ id: "edit", label: "Edit storage connection…", action: "edit" },
+							...(state.selected.usedBy.length === 0
+								? [
+										{
+											id: "remove",
+											label: "Remove storage connection…",
+											action: "remove" as const,
+										},
+									]
+								: []),
+							{ id: "back", label: "Back", action: "back" },
+						]
+					: [{ id: "back", label: "Back", action: "back" }],
+				hint: "back",
+			}),
+		},
+		actions: {
+			add: async () => {
+				await showAddStorageConnection(ctx, signal);
+				return { kind: "stay" };
+			},
+			select: async ({ itemId }) => {
+				selectedName = nameById.get(itemId);
+				return selectedName
+					? { kind: "to", screen: "detail" }
+					: { kind: "rejected" };
+			},
+			edit: async ({ state }) => {
+				if (!state.selected) return { kind: "rejected" };
+				await showEditGitStorageProfile(
+					ctx,
+					state.selected.name,
+					state.selected.profile,
+					signal,
+					state.selected.usedBy,
+				);
+				return { kind: "stay" };
+			},
+			remove: async ({ state }) => {
+				if (!state.selected) return { kind: "rejected" };
+				const confirmed = await ctx.ui.confirm(
+					"Remove storage connection?",
+					`Remove “${safeTerminalText(state.selected.name)}”?`,
+					{ signal },
+				);
+				if (confirmed)
+					await removeStorageConnection(state.selected.name, signal);
+				return { kind: "back" };
+			},
+			back: async () => {
+				selectedName = undefined;
+				return { kind: "back" };
+			},
+		},
+	});
+	await runMenu(ctx, menu, {
+		getState: () => loadStorageMenuState(selectedName, signal),
+		signal,
+		isCurrent: () => !signal?.aborted,
+	});
+}
+
+async function loadStorageMenuState(
+	selectedName: string | undefined,
+	signal?: AbortSignal,
+) {
+	const raw = await readLocalConfigObject();
+	if (signal?.aborted) throw signal.reason;
+	const profiles = ownRecord(raw?.storageConnections) ?? {};
+	const profile = selectedName ? ownRecord(profiles[selectedName]) : undefined;
+	if (!selectedName || !profile) {
+		return { version3: raw?.version === 3, profiles, selected: undefined };
+	}
+	const usedBy = Object.entries(ownRecord(raw?.syncSetups) ?? {})
+		.filter(
+			([, value]) =>
+				ownRecord(ownRecord(value)?.storage)?.connection === selectedName,
+		)
+		.map(([name]) => name)
+		.sort();
+	return {
+		version3: raw?.version === 3,
+		profiles,
+		selected: {
+			name: selectedName,
+			profile,
+			usedBy,
+			lines: [
+				"Type: Git",
+				`Endpoint: ${safeGitRemote(String(profile.remote ?? ""))}`,
+				"Credentials: Git credential helper or SSH configuration",
+				`Used by: ${usedBy.length > 0 ? usedBy.map(safeTerminalText).join(", ") : "No sync setups"}`,
+				...(usedBy.length > 0
+					? ["Remove unavailable: edit or remove the listed sync setups first."]
+					: []),
+			],
+		},
+	};
+}
+
+export async function showAddStorageConnection(
+	ctx: ExtensionCommandContext,
+	signal?: AbortSignal,
+) {
+	return showAddGitStorageProfile(ctx, signal);
 }

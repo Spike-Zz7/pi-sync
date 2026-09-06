@@ -102,7 +102,10 @@ export class MemorySyncBackend implements SyncBackend {
 	}
 }
 
-function matchesExpected(head: RemoteHead | undefined, expected: ExpectedRemoteHead) {
+function matchesExpected(
+	head: RemoteHead | undefined,
+	expected: ExpectedRemoteHead,
+) {
 	if (expected.kind === "missing") return head === undefined;
 	return head?.revision === expected.revision;
 }

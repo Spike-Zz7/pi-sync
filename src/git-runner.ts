@@ -33,7 +33,10 @@ export class GitCommandError extends Error {
 	}
 }
 
-export async function runGit(args: string[], options: GitRunOptions = {}): Promise<GitRunResult> {
+export async function runGit(
+	args: string[],
+	options: GitRunOptions = {},
+): Promise<GitRunResult> {
 	throwIfAborted(options.signal);
 	const hooksPath = process.platform === "win32" ? "NUL" : "/dev/null";
 	const protocolArgs = [
@@ -50,22 +53,28 @@ export async function runGit(args: string[], options: GitRunOptions = {}): Promi
 		"-c",
 		"protocol.ssh.allow=always",
 	];
-	if (options.allowFileProtocol) protocolArgs.push("-c", "protocol.file.allow=always");
+	if (options.allowFileProtocol)
+		protocolArgs.push("-c", "protocol.file.allow=always");
 	const commandArgs = [
 		...(options.gitDir ? [`--git-dir=${options.gitDir}`] : []),
 		...protocolArgs,
 		...args,
 	];
+	const blockedEnvironmentKeys = new Set([
+		"PAGER",
+		"EDITOR",
+		"VISUAL",
+		"SSH_ASKPASS",
+		"SSH_ASKPASS_REQUIRE",
+	]);
 	const inheritedEnvironment = Object.fromEntries(
-		Object.entries(process.env).filter(
-			([key]) =>
-				!key.startsWith("GIT_") &&
-				key !== "PAGER" &&
-				key !== "EDITOR" &&
-				key !== "VISUAL" &&
-				key !== "SSH_ASKPASS" &&
-				key !== "SSH_ASKPASS_REQUIRE",
-		),
+		Object.entries(process.env).filter(([key]) => {
+			const normalized = key.toUpperCase();
+			return (
+				!normalized.startsWith("GIT_") &&
+				!blockedEnvironmentKeys.has(normalized)
+			);
+		}),
 	);
 	const allowedGitOverrides = new Set([
 		"GIT_INDEX_FILE",
@@ -77,9 +86,12 @@ export async function runGit(args: string[], options: GitRunOptions = {}): Promi
 		"GIT_COMMITTER_DATE",
 	]);
 	const suppliedEnvironment = Object.fromEntries(
-		Object.entries(options.env ?? {}).filter(
-			([key]) => !key.startsWith("GIT_") || allowedGitOverrides.has(key),
-		),
+		Object.entries(options.env ?? {}).filter(([key]) => {
+			const normalized = key.toUpperCase();
+			return (
+				!normalized.startsWith("GIT_") || allowedGitOverrides.has(normalized)
+			);
+		}),
 	);
 	const env: NodeJS.ProcessEnv = {
 		...inheritedEnvironment,
@@ -126,10 +138,14 @@ export async function runGit(args: string[], options: GitRunOptions = {}): Promi
 		} else {
 			child.kill("SIGTERM");
 			if (child.pid && process.platform === "win32") {
-				const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-					stdio: "ignore",
-					windowsHide: true,
-				});
+				const killer = spawn(
+					"taskkill",
+					["/pid", String(child.pid), "/t", "/f"],
+					{
+						stdio: "ignore",
+						windowsHide: true,
+					},
+				);
 				killer.on("error", () => undefined);
 				killer.unref();
 			}
@@ -169,7 +185,9 @@ export async function runGit(args: string[], options: GitRunOptions = {}): Promi
 	const timer = setTimeout(
 		() =>
 			terminate(
-				new Error(`Git command timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`),
+				new Error(
+					`Git command timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.`,
+				),
 			),
 		options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 	);
@@ -209,7 +227,11 @@ export async function runGit(args: string[], options: GitRunOptions = {}): Promi
 	return result;
 }
 
-export function parseGitBlobBatch(output: Buffer, expectedCount: number, maxContentBytes: number) {
+export function parseGitBlobBatch(
+	output: Buffer,
+	expectedCount: number,
+	maxContentBytes: number,
+) {
 	if (!Number.isSafeInteger(expectedCount) || expectedCount < 0) {
 		throw new Error("Invalid Git batch object count.");
 	}
@@ -221,36 +243,51 @@ export function parseGitBlobBatch(output: Buffer, expectedCount: number, maxCont
 	let contentBytes = 0;
 	for (let index = 0; index < expectedCount; index += 1) {
 		const headerEnd = output.indexOf(0x0a, offset);
-		if (headerEnd < 0) throw new Error("Git cat-file batch response is truncated.");
+		if (headerEnd < 0)
+			throw new Error("Git cat-file batch response is truncated.");
 		const header = output.subarray(offset, headerEnd).toString("utf8");
-		if (header.endsWith(" missing")) throw new Error("Git cat-file batch object is missing.");
-		const match = /^(?<object>[0-9a-f]{40}) blob (?<size>0|[1-9][0-9]*)$/u.exec(header);
-		if (!match?.groups) throw new Error("Git cat-file batch response is malformed.");
+		if (header.endsWith(" missing"))
+			throw new Error("Git cat-file batch object is missing.");
+		const match = /^(?<object>[0-9a-f]{40}) blob (?<size>0|[1-9][0-9]*)$/u.exec(
+			header,
+		);
+		if (!match?.groups)
+			throw new Error("Git cat-file batch response is malformed.");
 		const size = Number(match.groups.size);
-		if (!Number.isSafeInteger(size)) throw new Error("Git cat-file batch size is malformed.");
+		if (!Number.isSafeInteger(size))
+			throw new Error("Git cat-file batch size is malformed.");
 		contentBytes += size;
 		if (contentBytes > maxContentBytes) {
-			throw new Error(`Git cat-file batch content exceeds the ${maxContentBytes}-byte limit.`);
+			throw new Error(
+				`Git cat-file batch content exceeds the ${maxContentBytes}-byte limit.`,
+			);
 		}
 		const contentStart = headerEnd + 1;
 		const contentEnd = contentStart + size;
-		if (contentEnd >= output.length) throw new Error("Git cat-file batch response is truncated.");
+		if (contentEnd >= output.length)
+			throw new Error("Git cat-file batch response is truncated.");
 		if (output[contentEnd] !== 0x0a) {
 			throw new Error("Git cat-file batch response is malformed.");
 		}
 		blobs.push(Buffer.from(output.subarray(contentStart, contentEnd)));
 		offset = contentEnd + 1;
 	}
-	if (offset !== output.length) throw new Error("Git cat-file batch response has trailing data.");
+	if (offset !== output.length)
+		throw new Error("Git cat-file batch response has trailing data.");
 	return blobs;
 }
 
 export async function readGitBlobs(
 	objects: string[],
-	options: Omit<GitRunOptions, "input" | "maxOutputBytes"> & { maxOutputBytes: number },
+	options: Omit<GitRunOptions, "input" | "maxOutputBytes"> & {
+		maxOutputBytes: number;
+	},
 ) {
 	if (objects.length === 0) return [];
-	if (!Number.isSafeInteger(options.maxOutputBytes) || options.maxOutputBytes < 0) {
+	if (
+		!Number.isSafeInteger(options.maxOutputBytes) ||
+		options.maxOutputBytes < 0
+	) {
 		throw new Error("Invalid Git batch output limit.");
 	}
 	if (objects.some((object) => !/^[0-9a-f]{40}$/u.test(object))) {
@@ -265,7 +302,11 @@ export async function readGitBlobs(
 		input: `${objects.join("\n")}\n`,
 		maxOutputBytes: options.maxOutputBytes + protocolOverhead,
 	});
-	return parseGitBlobBatch(result.stdout, objects.length, options.maxOutputBytes);
+	return parseGitBlobBatch(
+		result.stdout,
+		objects.length,
+		options.maxOutputBytes,
+	);
 }
 
 function throwIfAborted(signal?: AbortSignal) {

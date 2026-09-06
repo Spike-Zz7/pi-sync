@@ -44,7 +44,10 @@ test("all backend-neutral sync routes operate against a Git target", async () =>
 			() =>
 				withTempHome(async (agentDir) => {
 					mkdirSync(agentDir, { recursive: true });
-					writeFileSync(path.join(agentDir, "settings.json"), '{"theme":"dark"}\n');
+					writeFileSync(
+						path.join(agentDir, "settings.json"),
+						'{"theme":"dark"}\n',
+					);
 					writeFileSync(
 						localConfigPath(),
 						JSON.stringify({
@@ -52,7 +55,10 @@ test("all backend-neutral sync routes operate against a Git target", async () =>
 							activeSyncSetup: "home",
 							onSwitch: "ask-before-pull",
 							storageConnections: {
-								github: { type: "git", remote: "ssh://git@example.com/private/pi-sync.git" },
+								github: {
+									type: "git",
+									remote: "ssh://git@example.com/private/pi-sync.git",
+								},
 							},
 							syncSetups: {
 								home: {
@@ -69,7 +75,11 @@ test("all backend-neutral sync routes operate against a Git target", async () =>
 					const backendConfig: ResolvedGitBackend = {
 						type: "git",
 						profile: { kind: "git", remote: fixture.remote },
-						destination: { branch: "pi-sync/home", directory: "pi-sync/home", namespace: "home" },
+						destination: {
+							branch: "pi-sync/home",
+							directory: "pi-sync/home",
+							namespace: "home",
+						},
 					};
 					const backend = new GitSyncBackend(backendConfig, {
 						cacheRoot: path.join(fixture.root, "cache"),
@@ -85,7 +95,10 @@ test("all backend-neutral sync routes operate against a Git target", async () =>
 					const first = await backend.readHead();
 					assert.ok(first);
 					await history(ctx, options(), factory);
-					writeFileSync(path.join(agentDir, "settings.json"), '{"theme":"light"}\n');
+					writeFileSync(
+						path.join(agentDir, "settings.json"),
+						'{"theme":"light"}\n',
+					);
 					await pull(ctx, options(), factory);
 					assert.equal(
 						readFileSync(path.join(agentDir, "settings.json"), "utf8"),
@@ -93,7 +106,10 @@ test("all backend-neutral sync routes operate against a Git target", async () =>
 					);
 					await syncBoth(ctx, options(), factory);
 					await rollback(ctx, options([first.snapshotId]), factory);
-					assert.notEqual((await backend.readHead())?.snapshotRef, first.snapshotRef);
+					assert.notEqual(
+						(await backend.readHead())?.snapshotRef,
+						first.snapshotRef,
+					);
 
 					const mock = createMockPi();
 					syncExtension(mock.pi);
@@ -101,7 +117,10 @@ test("all backend-neutral sync routes operate against a Git target", async () =>
 					const configOutput = notifications.at(-1)?.message ?? "";
 					assert.match(configOutput, /kind: git/);
 					assert.match(configOutput, /branch: pi-sync\/home/);
-					assert.doesNotMatch(configOutput, /password|accessKeyId|secretAccessKey/i);
+					assert.doesNotMatch(
+						configOutput,
+						/password|accessKeyId|secretAccessKey/i,
+					);
 					const output = notifications.map((item) => item.message).join("\n");
 					assert.match(output, /lease-protected \(exact expected-ref update\)/);
 					assert.match(output, /git remote: reachable/i);

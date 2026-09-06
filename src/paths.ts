@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import path from "node:path";
 
 export function isDeniedPath(relativePath: string) {
@@ -15,19 +16,25 @@ export function isDeniedPath(relativePath: string) {
 		base.startsWith(".env.") ||
 		base.endsWith(".env") ||
 		base.includes("secret") ||
-		base.includes("token") ||
+		(base.includes("token") && !base.startsWith("token-usage")) ||
 		base === "pi-sync.json" ||
 		base.startsWith("pi-sync.json.") ||
 		base.startsWith(".pi-sync.json.") ||
 		base === "pi-sync.local.json" ||
 		base.startsWith("pi-sync.local.json.") ||
-		base.startsWith(".pi-sync.local.json.")
+		base.startsWith(".pi-sync.local.json.") ||
+		base === "auth.json" ||
+		base.startsWith("auth.json.") ||
+		base.startsWith(".auth.json.")
 	);
 }
 
 export function isPathInside(parent: string, child: string) {
 	const relative = path.relative(path.resolve(parent), path.resolve(child));
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+	return (
+		relative === "" ||
+		(!relative.startsWith("..") && !path.isAbsolute(relative))
+	);
 }
 
 export function safeJoin(root: string, relativePath: string) {
@@ -39,13 +46,12 @@ export function safeJoin(root: string, relativePath: string) {
 export function assertWithinRoot(root: string, target: string, label = target) {
 	const resolvedRoot = path.resolve(root);
 	const resolvedTarget = path.resolve(target);
-	if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`)) {
+	if (
+		resolvedTarget !== resolvedRoot &&
+		!resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`)
+	) {
 		throw new Error(`Unsafe path in snapshot: ${label}`);
 	}
-}
-
-export function encodeKey(key: string) {
-	return key.split("/").map(encodeURIComponent).join("/");
 }
 
 export function posixJoin(...parts: string[]) {
@@ -75,4 +81,19 @@ function trimSlashes(value: string) {
 
 export function safeName(value: string) {
 	return value.replace(/[^A-Za-z0-9._-]/g, "_");
+}
+
+function expandHome(value: string) {
+	if (value === "~") return homedir();
+	if (value.startsWith("~/")) return path.join(homedir(), value.slice(2));
+	return value;
+}
+
+export function sessionStorageRoot(
+	root: string,
+	configuredSessionDir?: string,
+) {
+	return configuredSessionDir
+		? path.resolve(expandHome(configuredSessionDir))
+		: path.resolve(root, "sessions");
 }

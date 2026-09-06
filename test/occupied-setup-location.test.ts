@@ -5,15 +5,15 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import { createMockContext } from "../../../test/support.js";
 import {
+	addSyncSetup,
 	loadConfig,
 	localConfigPath,
 	readLocalConfigObject,
 	validateSettingsDocument,
 } from "../src/config.js";
+import { promptAvailableSetupStorage } from "../src/git-ui.js";
 import { showSyncManager } from "../src/manager-ui.js";
-import { addSyncSetup } from "../src/settings-management.js";
-import { promptAvailableSetupStorage } from "../src/setup-location-ui.js";
-import { v3S3Settings, v3WebDavSettings, withTempHome } from "./helpers.js";
+import { withTempHome } from "./helpers.js";
 
 initTheme("dark", false);
 
@@ -21,33 +21,41 @@ function seed(value: string) {
 	mkdirSync(path.dirname(localConfigPath()), { recursive: true });
 	writeFileSync(localConfigPath(), value, { mode: 0o600 });
 }
-const kinds = ["R2", "S3", "WebDAV", "Git"] as const;
+const kinds = ["Git"] as const;
 
-// A separate branch/bucket/path must keep the root default when it is not occupied.
-test.each(kinds)("%s free coordinates do not prompt or mutate settings", async (kind) => {
-	await withTempHome(async () => {
-		const { settings, connection } = fixture(kind, false);
-		const storage = { ...settings.syncSetups.home.storage, connection, path: "./" };
-		if (kind === "Git") storage.branch = "other";
-		else if (kind === "WebDAV") settings.syncSetups.home.storage.path = "archives/home";
-		else storage.bucket = "other-bucket";
-		const before = JSON.stringify(settings);
-		seed(before);
-		let prompts = 0;
-		const { ctx, notifications } = createMockContext({
-			hasUI: true,
-			mode: "tui",
-			input: async () => {
-				prompts++;
-				return undefined;
-			},
+// A free branch must keep the root path default without prompting.
+test.each(kinds)(
+	"%s free coordinates do not prompt or mutate settings",
+	async (kind) => {
+		await withTempHome(async () => {
+			const { settings, connection } = fixture(kind, false);
+			const storage = {
+				...settings.syncSetups.home.storage,
+				connection,
+				path: "./",
+				branch: "other",
+			};
+			const before = JSON.stringify(settings);
+			seed(before);
+			let prompts = 0;
+			const { ctx, notifications } = createMockContext({
+				hasUI: true,
+				mode: "tui",
+				input: async () => {
+					prompts++;
+					return undefined;
+				},
+			});
+			assert.deepEqual(
+				await promptAvailableSetupStorage(ctx, storage),
+				storage,
+			);
+			assert.equal(prompts, 0);
+			assert.deepEqual(notifications, []);
+			assert.equal(readFileSync(localConfigPath(), "utf8"), before);
 		});
-		assert.deepEqual(await promptAvailableSetupStorage(ctx, storage), storage);
-		assert.equal(prompts, 0);
-		assert.deepEqual(notifications, []);
-		assert.equal(readFileSync(localConfigPath(), "utf8"), before);
-	});
-});
+	},
+);
 
 test.each(kinds)(
 	"%s correction rechecks invalid, occupied, and concurrently occupied coordinates",
@@ -55,13 +63,7 @@ test.each(kinds)(
 		await withTempHome(async () => {
 			const { settings, connection } = fixture(kind, false);
 			seed(JSON.stringify(settings));
-			const git = kind === "Git";
-			const answers = [
-				git ? "main" : ".",
-				git ? "bad..branch" : "../unsafe",
-				git ? "claimed" : "backups/claimed",
-				git ? "free" : "backups/free",
-			];
+			const answers = ["main", "bad..branch", "claimed", "free"];
 			let prompts = 0;
 			const { ctx, notifications } = createMockContext({
 				hasUI: true,
@@ -69,9 +71,7 @@ test.each(kinds)(
 				input: async () => {
 					if (prompts === 2) {
 						const competitor = structuredClone(settings.syncSetups.home);
-						if (typeof competitor.storage.branch === "string")
-							competitor.storage.branch = "claimed";
-						else competitor.storage.path = "backups/claimed";
+						competitor.storage.branch = "claimed";
 						await addSyncSetup("competitor", competitor);
 					}
 					return answers[prompts++];
@@ -83,10 +83,13 @@ test.each(kinds)(
 				path: "./",
 			});
 			assert.equal(prompts, 4);
-			assert.equal(git ? storage?.branch : storage?.path, git ? "free" : "backups/free");
+			assert.equal(storage?.branch, "free");
 			assert.ok(notifications.some((n) => /competitor/u.test(n.message)));
 			assert.ok(notifications.some((n) => /Invalid/u.test(n.message)));
-			assert.deepEqual((await readLocalConfigObject())?.syncSetups.home, settings.syncSetups.home);
+			assert.deepEqual(
+				(await readLocalConfigObject())?.syncSetups.home,
+				settings.syncSetups.home,
+			);
 		});
 	},
 );
@@ -95,34 +98,42 @@ test("location preflight leaves malformed settings untouched", async () => {
 	await withTempHome(async () => {
 		seed("{invalid");
 		const { ctx } = createMockContext({ hasUI: true, mode: "tui" });
-		await assert.rejects(promptAvailableSetupStorage(ctx, { connection: "dav", path: "./" }));
+		await assert.rejects(
+			promptAvailableSetupStorage(ctx, {
+				connection: "origin",
+				branch: "main",
+				path: "./",
+			}),
+		);
 		assert.equal(readFileSync(localConfigPath(), "utf8"), "{invalid");
 	});
 });
 
-function fixture(kind: (typeof kinds)[number], alias: boolean) {
-	const settings = validateSettingsDocument(
-		kind === "WebDAV" ? v3WebDavSettings() : v3S3Settings({ path: "./", bucket: "pi-sync" }),
-	);
-	const source = kind === "WebDAV" ? "dav" : "r2";
-	if (kind === "Git") {
-		settings.storageConnections[source] = {
-			type: "git",
-			remote: "git@example.com:private/pi-sync.git",
-		};
-		settings.syncSetups.home.storage = { connection: source, path: "./", branch: "main" };
-	} else if (kind === "S3") {
-		const connection = settings.storageConnections[source];
-		if (connection.type === "s3") connection.endpoint = "https://s3.example.com";
-	}
-	settings.syncSetups.home.storage.path = ".";
+function fixture(_kind: (typeof kinds)[number], alias: boolean) {
+	const settings = validateSettingsDocument({
+		version: 3,
+		activeSyncSetup: "home",
+		onSwitch: "ask-before-pull",
+		storageConnections: {
+			origin: {
+				type: "git",
+				remote: "git@example.com:private/pi-sync.git",
+			},
+		},
+		syncSetups: {
+			home: {
+				storage: { connection: "origin", path: "./", branch: "main" },
+				sync: { include: ["settings.json"], automatic: false },
+			},
+		},
+	});
+	const source = "origin";
 	if (alias) {
-		settings.storageConnections.alias = structuredClone(settings.storageConnections[source]);
+		settings.storageConnections.alias = structuredClone(
+			settings.storageConnections[source],
+		);
 		const connection = settings.storageConnections.alias;
-		if (connection.type === "git")
-			connection.remote = "ssh://git@EXAMPLE.com:22/private/pi-sync.git/";
-		else if (connection.type === "webdav") connection.url += "/";
-		else connection.endpoint += "/";
+		connection.remote = "ssh://git@EXAMPLE.com:22/private/pi-sync.git/";
 	}
 	return { settings, connection: alias ? "alias" : source };
 }
@@ -130,7 +141,7 @@ function fixture(kind: (typeof kinds)[number], alias: boolean) {
 for (const kind of kinds) {
 	test.each(
 		[false, true].flatMap((alias) =>
-			(kind === "Git" ? ["./", "archives/work"] : ["./"]).map((storagePath) => ({
+			["./", "archives/work"].map((storagePath) => ({
 				alias,
 				storagePath,
 			})),
@@ -143,31 +154,17 @@ for (const kind of kinds) {
 				seed(JSON.stringify(settings));
 				const inputs = [
 					"work",
-					...(kind === "Git"
-						? ["", storagePath === "./" ? "" : storagePath]
-						: kind === "WebDAV"
-							? [""]
-							: alias && kind === "S3"
-								? ["pi-sync"]
-								: []),
-					kind === "Git" ? "work-branch" : "backups/work",
+					"",
+					storagePath === "./" ? "" : storagePath,
+					"work-branch",
 				];
 				const choices = [
 					"More…",
 					"Sync setups…",
 					"Add sync setup",
 					connection,
-					...(kind === "S3" || kind === "R2"
-						? [
-								alias
-									? kind === "R2"
-										? "Use suggested location (recommended)"
-										: "Use existing bucket with suggested path (recommended)"
-									: "Same bucket as “home”",
-							]
-						: []),
 					"Minimal settings",
-					...(kind === "Git" ? ["Keep automatic sync off"] : []),
+					"Keep automatic sync off",
 					"Add sync setup",
 					undefined,
 				];
@@ -186,17 +183,20 @@ for (const kind of kinds) {
 				});
 				await showSyncManager(ctx, async () => undefined);
 				const config = await loadConfig("work");
-				assert.equal(config.storagePath, kind === "Git" ? storagePath : "backups/work");
-				if (config.backend.type === "git")
-					assert.equal(config.backend.destination.branch, "work-branch");
+				assert.equal(config.storagePath, storagePath);
+				assert.equal(config.backend.destination.branch, "work-branch");
 				assert.deepEqual(
 					(await readLocalConfigObject())?.syncSetups.home,
 					settings.syncSetups.home,
 				);
-				const warning = notifications.find((n) => /already used/u.test(n.message));
+				const warning = notifications.find((n) =>
+					/already used/u.test(n.message),
+				);
 				assert.ok(warning, JSON.stringify(notifications));
 				assert.match(warning.message, /home/u);
-				const correction = titles.findIndex((t) => /already used by “/u.test(t));
+				const correction = titles.findIndex((t) =>
+					/already used by “/u.test(t),
+				);
 				const content = titles.findIndex((t) =>
 					/Choose (included content|an initial sync preset)/u.test(t),
 				);
@@ -213,13 +213,12 @@ for (const kind of kinds) {
 				const before = JSON.stringify(settings);
 				seed(before);
 				const controller = new AbortController();
-				const inputs = ["work", ...(kind === "Git" ? ["", ""] : kind === "WebDAV" ? [""] : [])];
+				const inputs = ["work", "", ""];
 				const choices = [
 					"More…",
 					"Sync setups…",
 					"Add sync setup",
 					connection,
-					...(kind === "S3" || kind === "R2" ? ["Same bucket as “home”"] : []),
 					undefined,
 				];
 				let correction = false;
@@ -231,7 +230,9 @@ for (const kind of kinds) {
 						if (!/already used by “/u.test(title)) return inputs.shift();
 						correction = true;
 						if (action === "abort") {
-							controller.abort(new DOMException("Session replaced", "AbortError"));
+							controller.abort(
+								new DOMException("Session replaced", "AbortError"),
+							);
 							return "late";
 						}
 						return undefined;

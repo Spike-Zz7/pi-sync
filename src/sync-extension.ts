@@ -26,10 +26,11 @@ import {
 	localConfigTemplate,
 	readLocalConfigObject,
 	readStateForConfig,
-	sessionTokenWarnings,
+	sessionDirFromContext,
 	syncSessionsWarnings,
 } from "./config.js";
 import { unlock, withLock } from "./lock.js";
+import { errorMessage } from "./manager-helpers.js";
 import { recoverSnapshotTransactionsOnStartup } from "./snapshot-transaction.js";
 import {
 	migrateLegacyStateDirectory,
@@ -43,22 +44,31 @@ import {
 	syncAttentionMatchesConfig,
 } from "./sync-attention.js";
 import {
-	errorMessage,
 	isSyncDecisionRequiredError,
 	SetupPullRequiresUiError,
-} from "./sync-errors.js";
+} from "./sync-decision.js";
 import {
 	formatRemoteSelectionMismatch,
 	type RemoteSelectionDecision,
 	RemoteSelectionMismatchError,
 } from "./sync-policy.js";
-import type { AnySyncConfig, CommandOptions, SnapshotOptions } from "./types.js";
+import type {
+	AnySyncConfig,
+	CommandOptions,
+	SnapshotOptions,
+} from "./types.js";
 
 const STATUS_KEY = "sync";
 
-type SetupSwitchModule = Pick<typeof import("./setup-switch.js"), "useSyncSetup">;
+type SetupSwitchModule = Pick<
+	typeof import("./setup-switch.js"),
+	"useSyncSetup"
+>;
 type SnapshotModule = Pick<typeof import("./snapshot.js"), "createSnapshot">;
-type SyncStateModule = Pick<typeof import("./sync-state.js"), "hasLocalChanges">;
+type SyncStateModule = Pick<
+	typeof import("./sync-state.js"),
+	"hasLocalChanges"
+>;
 type SyncOperations = typeof import("./sync-operations.js");
 
 export interface SyncDependencies {
@@ -84,13 +94,20 @@ const AUTO_SYNC_OPTIONS: CommandOptions = {
 	auto: true,
 	args: [],
 };
-export default function sync(pi: ExtensionAPI, dependencies: Partial<SyncDependencies> = {}) {
+export default function sync(
+	pi: ExtensionAPI,
+	dependencies: Partial<SyncDependencies> = {},
+) {
 	const loaders: SyncLoaders = {
 		setupSwitch: cachedModuleLoader(
 			dependencies.loadSetupSwitch ?? (() => import("./setup-switch.js")),
 		),
-		snapshot: cachedModuleLoader(dependencies.loadSnapshot ?? (() => import("./snapshot.js"))),
-		syncState: cachedModuleLoader(dependencies.loadSyncState ?? (() => import("./sync-state.js"))),
+		snapshot: cachedModuleLoader(
+			dependencies.loadSnapshot ?? (() => import("./snapshot.js")),
+		),
+		syncState: cachedModuleLoader(
+			dependencies.loadSyncState ?? (() => import("./sync-state.js")),
+		),
 		operations: cachedModuleLoader(
 			dependencies.loadSyncOperations ?? (() => import("./sync-operations.js")),
 		),
@@ -100,7 +117,7 @@ export default function sync(pi: ExtensionAPI, dependencies: Partial<SyncDepende
 	let shutdownAbort: AbortController | undefined;
 
 	pi.registerCommand("sync", {
-		description: "Sync Pi settings through Git, WebDAV, R2, or S3-compatible storage",
+		description: "Sync Pi settings through Git",
 		getArgumentCompletions: completeSyncArguments,
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
@@ -108,7 +125,8 @@ export default function sync(pi: ExtensionAPI, dependencies: Partial<SyncDepende
 					"/sync requires TUI or RPC mode so results and safety prompts are observable.",
 				);
 			}
-			const run = () => handleCommand(args, ctx, sessionAbort.signal, loaders, attention);
+			const run = () =>
+				handleCommand(args, ctx, sessionAbort.signal, loaders, attention);
 			if (splitArgs(args)[0] === "migrate-state") await run();
 			else await withStateDirectoryAccess(run);
 		},
@@ -123,10 +141,15 @@ export default function sync(pi: ExtensionAPI, dependencies: Partial<SyncDepende
 		attention.reset(ctx);
 		let decision: RemoteSelectionDecision | undefined;
 		try {
-			decision = await withStateDirectoryAccess(() => startSession(ctx, signal, loaders));
+			decision = await withStateDirectoryAccess(() =>
+				startSession(ctx, signal, loaders),
+			);
 		} catch (error) {
 			if (signal.aborted) return;
-			ctx.ui.notify(`pi-sync state access failed: ${errorMessage(error)}`, "error");
+			ctx.ui.notify(
+				`pi-sync state access failed: ${errorMessage(error)}`,
+				"error",
+			);
 			return;
 		}
 		if (!decision || signal.aborted) return;
@@ -152,12 +175,19 @@ export default function sync(pi: ExtensionAPI, dependencies: Partial<SyncDepende
 	pi.on("session_shutdown", async (event, ctx) => {
 		sessionAbort.abort(new DOMException("Session shut down", "AbortError"));
 		attention.reset(ctx);
-		shutdownAbort?.abort(new DOMException("Session shut down again", "AbortError"));
+		shutdownAbort?.abort(
+			new DOMException("Session shut down again", "AbortError"),
+		);
 		const controller = new AbortController();
 		shutdownAbort = controller;
-		const signal = combineSignals(controller.signal, AbortSignal.timeout(30_000));
+		const signal = combineSignals(
+			controller.signal,
+			AbortSignal.timeout(30_000),
+		);
 		const reason =
-			typeof event === "object" && event ? (event as { reason?: string }).reason : undefined;
+			typeof event === "object" && event
+				? (event as { reason?: string }).reason
+				: undefined;
 		try {
 			if (reason !== "reload") {
 				await withStateDirectoryAccess(async () => {
@@ -167,7 +197,10 @@ export default function sync(pi: ExtensionAPI, dependencies: Partial<SyncDepende
 			}
 		} catch (error) {
 			if (!signal.aborted) {
-				ctx.ui.notify(`pi-sync session push skipped: ${errorMessage(error)}`, "warning");
+				ctx.ui.notify(
+					`pi-sync session push skipped: ${errorMessage(error)}`,
+					"warning",
+				);
 			}
 		} finally {
 			if (shutdownAbort === controller) shutdownAbort = undefined;
@@ -177,13 +210,20 @@ export default function sync(pi: ExtensionAPI, dependencies: Partial<SyncDepende
 	});
 }
 
-async function startSession(ctx: ExtensionContext, signal: AbortSignal, loaders: SyncLoaders) {
+async function startSession(
+	ctx: ExtensionContext,
+	signal: AbortSignal,
+	loaders: SyncLoaders,
+) {
 	if (signal.aborted) return;
 	try {
 		const migrationNotice = stateDirectoryMigrationNotice();
 		if (migrationNotice) ctx.ui.notify(migrationNotice, "warning");
 	} catch (error) {
-		ctx.ui.notify(`pi-sync state directory requires attention: ${errorMessage(error)}`, "error");
+		ctx.ui.notify(
+			`pi-sync state directory requires attention: ${errorMessage(error)}`,
+			"error",
+		);
 		return;
 	}
 	try {
@@ -251,7 +291,9 @@ async function handleCommand(
 	} else if (result.kind === "remote-selection-required") {
 		const origin = directSelectionOrigin(rawArgs);
 		if (origin) attention.set(result.decision, origin);
-		const deterministic = splitArgs(rawArgs).some((arg) => arg === "--yes" || arg === "-y");
+		const deterministic = splitArgs(rawArgs).some(
+			(arg) => arg === "--yes" || arg === "-y",
+		);
 		if (origin && ctx.mode === "tui" && !deterministic) {
 			await resolveSelectionAttention(ctx, attention, sessionSignal, loaders);
 		} else {
@@ -265,7 +307,13 @@ async function handleCommand(
 			);
 		}
 	}
-	await clearAttentionAfterCompletedOperation(rawArgs, result, ctx, attention, sessionSignal);
+	await clearAttentionAfterCompletedOperation(
+		rawArgs,
+		result,
+		ctx,
+		attention,
+		sessionSignal,
+	);
 	await reconcileSelectionAttention(ctx, attention, sessionSignal);
 	if (!sessionSignal.aborted) attention.publish(ctx);
 }
@@ -277,7 +325,12 @@ async function clearAttentionAfterCompletedOperation(
 	attention: SyncAttentionController,
 	signal: AbortSignal,
 ) {
-	if (result.kind !== "completed" || result.outcome === "cancelled" || signal.aborted) return;
+	if (
+		result.kind !== "completed" ||
+		result.outcome === "cancelled" ||
+		signal.aborted
+	)
+		return;
 	const [command, ...rest] = splitArgs(rawArgs);
 	if (command !== "sync" && command !== "pull" && command !== "push") return;
 	const current = attention.current();
@@ -304,13 +357,18 @@ async function reconcileSelectionAttention(
 		if (signal.aborted || attention.current() !== current) return;
 		if (!syncAttentionMatchesConfig(current, config)) attention.clear(ctx);
 	} catch {
-		if (!signal.aborted && attention.current() === current) attention.clear(ctx);
+		if (!signal.aborted && attention.current() === current)
+			attention.clear(ctx);
 	}
 }
 
-function directSelectionOrigin(rawArgs: string): SyncAttentionOrigin | undefined {
+function directSelectionOrigin(
+	rawArgs: string,
+): SyncAttentionOrigin | undefined {
 	const command = splitArgs(rawArgs)[0];
-	return command === "sync" || command === "pull" || command === "push" ? command : undefined;
+	return command === "sync" || command === "pull" || command === "push"
+		? command
+		: undefined;
 }
 
 async function resolveSelectionAttention(
@@ -325,7 +383,9 @@ async function resolveSelectionAttention(
 ) {
 	const current = attention.current();
 	if (!current || signal.aborted) return;
-	const { dispatchManagerResult } = await import("./manager-result-dispatcher.js");
+	const { dispatchManagerResult } = await import(
+		"./manager-result-dispatcher.js"
+	);
 	if (signal.aborted || attention.current() !== current) return;
 	await dispatchManagerResult(
 		ctx,
@@ -341,7 +401,9 @@ async function resolveSelectionAttention(
 					onCommit,
 					target,
 				);
-			return options.withStateAccess ? options.withStateAccess(execute) : execute();
+			return options.withStateAccess
+				? options.withStateAccess(execute)
+				: execute();
 		},
 		signal,
 		{
@@ -364,8 +426,14 @@ async function executeRecoveryCommand(
 ): Promise<RunRouteResult> {
 	try {
 		const [subcommand, ...rest] = splitArgs(rawArgs);
-		if (subcommand !== "sync" && subcommand !== "pull" && subcommand !== "push") {
-			throw new Error(`Unsupported sync recovery route: ${subcommand ?? "missing"}`);
+		if (
+			subcommand !== "sync" &&
+			subcommand !== "pull" &&
+			subcommand !== "push"
+		) {
+			throw new Error(
+				`Unsupported sync recovery route: ${subcommand ?? "missing"}`,
+			);
 		}
 		const options = parseOptions(rest);
 		if (setup !== undefined) options.setup = setup;
@@ -377,11 +445,15 @@ async function executeRecoveryCommand(
 		const operations = await loaders.operations();
 		throwIfAborted(options.signal);
 		if (subcommand === "push") {
-			const outcome = await withLock("push", () => operations.push(ctx, options));
+			const outcome = await withLock("push", () =>
+				operations.push(ctx, options),
+			);
 			return { kind: "completed", ...(outcome ? { outcome } : {}) };
 		}
 		if (subcommand === "pull") {
-			const outcome = await withLock("pull", () => operations.pull(ctx, options));
+			const outcome = await withLock("pull", () =>
+				operations.pull(ctx, options),
+			);
 			return { kind: "completed", ...(outcome ? { outcome } : {}) };
 		}
 		await withLock("sync", () => operations.syncBoth(ctx, options));
@@ -473,13 +545,17 @@ async function executeCommand(
 			case "push": {
 				const operations = await loaders.operations();
 				throwIfAborted(options.signal);
-				const outcome = await withLock("push", () => operations.push(ctx, options));
+				const outcome = await withLock("push", () =>
+					operations.push(ctx, options),
+				);
 				return { kind: "completed", ...(outcome ? { outcome } : {}) };
 			}
 			case "pull": {
 				const operations = await loaders.operations();
 				throwIfAborted(options.signal);
-				const outcome = await withLock("pull", () => operations.pull(ctx, options));
+				const outcome = await withLock("pull", () =>
+					operations.pull(ctx, options),
+				);
 				return { kind: "completed", ...(outcome ? { outcome } : {}) };
 			}
 			case "sync": {
@@ -507,7 +583,10 @@ async function executeCommand(
 				await unlock(ctx, options);
 				return { kind: "completed" };
 			default:
-				ctx.ui.notify(`Unknown /sync command: ${subcommand}\n\n${usage()}`, "warning");
+				ctx.ui.notify(
+					`Unknown /sync command: ${subcommand}\n\n${usage()}`,
+					"warning",
+				);
 				return { kind: "failed" };
 		}
 	} catch (error) {
@@ -525,10 +604,16 @@ async function executeCommand(
 	}
 }
 
-async function migrateStateDirectory(ctx: ExtensionCommandContext, options: CommandOptions) {
+async function migrateStateDirectory(
+	ctx: ExtensionCommandContext,
+	options: CommandOptions,
+) {
 	const notice = stateDirectoryMigrationNotice();
 	if (!notice) {
-		ctx.ui.notify("pi-sync already uses the canonical pi-sync/ state directory.", "info");
+		ctx.ui.notify(
+			"pi-sync already uses the canonical pi-sync/ state directory.",
+			"info",
+		);
 		return;
 	}
 	if (
@@ -546,10 +631,16 @@ async function migrateStateDirectory(ctx: ExtensionCommandContext, options: Comm
 	const result = await migrateLegacyStateDirectory();
 	throwIfAborted(options.signal);
 	if (result.status === "ready") {
-		ctx.ui.notify("pi-sync already uses the canonical pi-sync/ state directory.", "info");
+		ctx.ui.notify(
+			"pi-sync already uses the canonical pi-sync/ state directory.",
+			"info",
+		);
 		return;
 	}
-	ctx.ui.notify(result.message, result.status === "migrated" ? "info" : "warning");
+	ctx.ui.notify(
+		result.message,
+		result.status === "migrated" ? "info" : "warning",
+	);
 }
 
 async function autoSync(
@@ -575,11 +666,18 @@ async function autoSync(
 		if (signal.aborted || isMissingConfigError(error)) return;
 		ctx.ui.setStatus(STATUS_KEY, undefined);
 		if (error instanceof RemoteSelectionMismatchError) return error.decision;
-		ctx.ui.notify(`pi-sync auto sync skipped: ${errorMessage(error)}`, "warning");
+		ctx.ui.notify(
+			`pi-sync auto sync skipped: ${errorMessage(error)}`,
+			"warning",
+		);
 	}
 }
 
-async function autoPushSessions(ctx: ExtensionContext, signal: AbortSignal, loaders: SyncLoaders) {
+async function autoPushSessions(
+	ctx: ExtensionContext,
+	signal: AbortSignal,
+	loaders: SyncLoaders,
+) {
 	try {
 		const partial = await loadPartialConfig();
 		throwIfAborted(signal);
@@ -606,19 +704,29 @@ async function autoPushSessions(ctx: ExtensionContext, signal: AbortSignal, load
 			);
 			throwIfAborted(signal);
 			if (!syncStateModule.hasLocalChanges(local, state, config)) return;
-			await operations.push(ctx, { ...AUTO_SYNC_OPTIONS, signal }, { config, state, local });
+			await operations.push(
+				ctx,
+				{ ...AUTO_SYNC_OPTIONS, signal },
+				{ config, state, local },
+			);
 		});
 	} catch (error) {
 		if (signal.aborted || isMissingConfigError(error)) return;
 		ctx.ui.setStatus(STATUS_KEY, undefined);
-		ctx.ui.notify(`pi-sync session push skipped: ${errorMessage(error)}`, "warning");
+		ctx.ui.notify(
+			`pi-sync session push skipped: ${errorMessage(error)}`,
+			"warning",
+		);
 	}
 }
 
 async function initConfig(ctx: ExtensionCommandContext, signal?: AbortSignal) {
 	const configPath = localConfigPath();
 	if (await readLocalConfigObject()) {
-		ctx.ui.notify(`Config already exists: ${await activeLocalConfigPath()}`, "info");
+		ctx.ui.notify(
+			`Config already exists: ${await activeLocalConfigPath()}`,
+			"info",
+		);
 		return;
 	}
 
@@ -635,13 +743,18 @@ async function initConfig(ctx: ExtensionCommandContext, signal?: AbortSignal) {
 	);
 }
 
-async function showConfig(ctx: ExtensionCommandContext, options: CommandOptions) {
+async function showConfig(
+	ctx: ExtensionCommandContext,
+	options: CommandOptions,
+) {
 	const config = await loadConfig(options.setup);
-	const warnings = [
-		...(config.backend.type === "s3" ? sessionTokenWarnings(config.backend.profile) : []),
-		...syncSessionsWarnings(config),
+	const warnings = syncSessionsWarnings(config);
+	const storageLines = [
+		"kind: git",
+		`remote: ${displayGitRemote(config.backend.profile.remote)}`,
+		"authentication: existing Git/SSH credentials (not stored)",
+		`branch: ${config.backend.destination.branch}`,
 	];
-	const storageLines = configStorageLines(config);
 	ctx.ui.notify(
 		[
 			"pi-sync config:",
@@ -659,35 +772,6 @@ async function showConfig(ctx: ExtensionCommandContext, options: CommandOptions)
 	);
 }
 
-function configStorageLines(config: AnySyncConfig) {
-	switch (config.backend.type) {
-		case "git":
-			return [
-				"kind: git",
-				`remote: ${displayGitRemote(config.backend.profile.remote)}`,
-				"authentication: existing Git/SSH credentials (not stored)",
-				`branch: ${config.backend.destination.branch}`,
-			];
-		case "webdav":
-			return [
-				"kind: webdav",
-				`url: ${displayWebDavUrl(config.backend.profile.url, config.backend.profile.username)}`,
-				"username: configured (value hidden)",
-				"password: configured",
-			];
-		case "s3":
-			return [
-				"kind: s3",
-				`endpoint: ${config.backend.profile.endpoint}`,
-				`bucket: ${config.backend.destination.bucket}`,
-				`region: ${config.backend.profile.region}`,
-				"access key id: configured",
-				"secret access key: configured",
-				`session token: ${config.backend.profile.sessionToken ? "configured" : "not configured"}`,
-			];
-	}
-}
-
 function displayGitRemote(value: string | undefined) {
 	if (!value) return "missing";
 	try {
@@ -699,20 +783,6 @@ function displayGitRemote(value: string | undefined) {
 		return url.toString();
 	} catch {
 		return value.replace(/^(?:[^@\s]+@)?(?<host>[^:]+):.+$/u, "$<host>:…");
-	}
-}
-
-function displayWebDavUrl(value: string | undefined, username: string | undefined) {
-	if (!value) return "missing";
-	try {
-		const url = new URL(value);
-		url.username = "";
-		url.password = "";
-		url.search = "";
-		url.hash = "";
-		return username ? `${url.origin}/…` : `${url.origin}${url.pathname}`;
-	} catch {
-		return "invalid (value hidden)";
 	}
 }
 
@@ -737,21 +807,9 @@ function snapshotOptionsForContext(
 	};
 }
 
-function sessionDirFromContext(ctx: ExtensionCommandContext | ExtensionContext) {
-	const manager = ctx.sessionManager as typeof ctx.sessionManager & {
-		usesDefaultSessionDir?: () => boolean;
-	};
-	const usesDefaultSessionDir = manager.usesDefaultSessionDir;
-	if (typeof usesDefaultSessionDir === "function" && usesDefaultSessionDir.call(manager)) {
-		return undefined;
-	}
-	const getSessionDir = manager.getSessionDir;
-	return typeof getSessionDir === "function"
-		? (getSessionDir.call(manager) as string | undefined)
-		: undefined;
-}
-
-function cachedModuleLoader<Module>(load: () => Promise<Module>): () => Promise<Module> {
+function cachedModuleLoader<Module>(
+	load: () => Promise<Module>,
+): () => Promise<Module> {
 	let pending: Promise<Module> | undefined;
 	return () => {
 		if (!pending) {

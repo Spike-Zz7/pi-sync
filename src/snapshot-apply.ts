@@ -30,7 +30,9 @@ function sha256(value: Buffer) {
 }
 
 function fileHashMap(snapshot: Snapshot) {
-	return Object.fromEntries(snapshot.files.map((file) => [file.path, file.sha256]));
+	return Object.fromEntries(
+		snapshot.files.map((file) => [file.path, file.sha256]),
+	);
 }
 
 export async function applySnapshot(
@@ -46,7 +48,9 @@ export async function applySnapshot(
 	await recoverPendingSnapshotTransactions();
 	const current = await createSnapshot(snapshot.profile, {
 		...options,
-		...(options.include === undefined ? { syncSessions: snapshotIncludesSessions(snapshot) } : {}),
+		...(options.include === undefined
+			? { syncSessions: snapshotIncludesSessions(snapshot) }
+			: {}),
 		sessionDir,
 	});
 	const plan = await addTopLevelCaseVariantDeletes(
@@ -60,7 +64,15 @@ export async function applySnapshot(
 		snapshot,
 	);
 	await preflightSnapshotMutations(root, plan, sessionDir);
-	await applySnapshotTransaction(plan, { sessionDir });
+	await applySnapshotTransaction(plan, {
+		sessionDir,
+		beforeWrite: (target) =>
+			prepareSnapshotWrite(
+				rootForTarget(root, target, sessionDir),
+				target,
+				new Set(),
+			),
+	});
 	return appliedFileHashMap(snapshot, current, protectedRelativePaths);
 }
 
@@ -83,7 +95,8 @@ export function preflightSnapshotApply(
 		if (isSessionPath(normalized) && !isSessionFilePath(normalized)) {
 			throw new Error(`Unsafe session path in snapshot: ${file.path}`);
 		}
-		if (seenPaths.has(normalized)) throw new Error(`Duplicate path in snapshot: ${normalized}`);
+		if (seenPaths.has(normalized))
+			throw new Error(`Duplicate path in snapshot: ${normalized}`);
 		seenPaths.add(normalized);
 		remotePaths.add(normalized);
 
@@ -207,12 +220,18 @@ function decodeBase64Strict(value: string, filePath: string) {
 
 async function preflightSnapshotMutations(
 	root: string,
-	plan: { deletes: string[]; writes: Array<{ target: string; content: Buffer }> },
+	plan: {
+		deletes: string[];
+		writes: Array<{ target: string; content: Buffer }>;
+	},
 	sessionDir?: string,
 ) {
 	const deletePaths = new Set(plan.deletes);
 	for (const target of plan.deletes) {
-		await assertNoSymlinkParents(rootForTarget(root, target, sessionDir), target);
+		await assertNoSymlinkParents(
+			rootForTarget(root, target, sessionDir),
+			target,
+		);
 	}
 	for (const item of plan.writes) {
 		await prepareSnapshotWrite(
@@ -224,27 +243,47 @@ async function preflightSnapshotMutations(
 }
 
 function rootForTarget(root: string, target: string, sessionDir?: string) {
-	const sessionRoot = sessionDir ? sessionStorageRoot(root, sessionDir) : undefined;
+	const sessionRoot = sessionDir
+		? sessionStorageRoot(root, sessionDir)
+		: undefined;
 	if (sessionRoot && isPathInside(sessionRoot, target)) return sessionRoot;
 	return root;
 }
 
-async function prepareSnapshotWrite(root: string, target: string, deletePaths: Set<string>) {
-	const parentWillBeReplaced = await ensureSafeDirectory(root, path.dirname(target), deletePaths);
-	if (parentWillBeReplaced) return;
+async function prepareSnapshotWrite(
+	root: string,
+	target: string,
+	deletePaths: Set<string>,
+) {
+	const needsDeferredCheck = await inspectSnapshotWriteParents(
+		root,
+		path.dirname(target),
+		deletePaths,
+	);
+	if (needsDeferredCheck) return;
 	try {
 		const stat = await fs.lstat(target);
 		if (stat.isSymbolicLink())
-			throw new Error(`Refusing to overwrite symlink during snapshot apply: ${target}`);
+			throw new Error(
+				`Refusing to overwrite symlink during snapshot apply: ${target}`,
+			);
 		if (stat.isDirectory() && !deletePaths.has(target)) {
-			throw new Error(`Refusing to overwrite directory during snapshot apply: ${target}`);
+			throw new Error(
+				`Refusing to overwrite directory during snapshot apply: ${target}`,
+			);
 		}
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 }
 
-async function ensureSafeDirectory(root: string, directory: string, deletePaths: Set<string>) {
+// A missing or scheduled-for-deletion parent defers target checks until the
+// transaction's write phase. Preflight must not create directories.
+async function inspectSnapshotWriteParents(
+	root: string,
+	directory: string,
+	deletePaths: Set<string>,
+) {
 	assertWithinRoot(root, directory);
 	const rootPath = path.resolve(root);
 	const relative = path.relative(rootPath, path.resolve(directory));
@@ -254,14 +293,16 @@ async function ensureSafeDirectory(root: string, directory: string, deletePaths:
 		try {
 			const stat = await fs.lstat(current);
 			if (stat.isSymbolicLink())
-				throw new Error(`Refusing to follow symlink during snapshot apply: ${current}`);
+				throw new Error(
+					`Refusing to follow symlink during snapshot apply: ${current}`,
+				);
 			if (!stat.isDirectory()) {
 				if (deletePaths.has(current)) return true;
 				throw new Error(`Snapshot path parent is not a directory: ${current}`);
 			}
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-			await fs.mkdir(current);
+			return true;
 		}
 	}
 	return false;
@@ -278,7 +319,9 @@ async function assertNoSymlinkParents(root: string, target: string) {
 		try {
 			const stat = await fs.lstat(current);
 			if (stat.isSymbolicLink())
-				throw new Error(`Refusing to follow symlink during snapshot apply: ${current}`);
+				throw new Error(
+					`Refusing to follow symlink during snapshot apply: ${current}`,
+				);
 			if (!stat.isDirectory())
 				throw new Error(`Snapshot path parent is not a directory: ${current}`);
 		} catch (error) {

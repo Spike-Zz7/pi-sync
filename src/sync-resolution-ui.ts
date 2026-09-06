@@ -30,7 +30,9 @@ export async function showSyncResolution(
 	type Action = "push" | "pull" | "back";
 	let currentDecision = initialDecision;
 	let resolvedDirection: SyncResolutionDirection | undefined;
-	let chainedResult: { result: RunRouteResult; route: SyncResolutionDirection } | undefined;
+	let chainedResult:
+		| { result: RunRouteResult; route: SyncResolutionDirection }
+		| undefined;
 	const menu = defineMenu<SyncDecision, Screen, Action, ExtensionContext>({
 		start: "resolve",
 		screens: {
@@ -39,13 +41,18 @@ export async function showSyncResolution(
 				title: resolutionTitle(state),
 				lines: resolutionLines(state),
 				items: [
-					{ id: "review", label: "Review differences (recommended)", to: "review" },
+					{
+						id: "review",
+						label: "Review differences (recommended)",
+						to: "review",
+					},
 					...(state.directions.includes("push")
 						? [
 								{
 									id: "push",
 									label: pushLabel(state),
-									description: "Review an exact push before replacing the remote version.",
+									description:
+										"Review an exact push before replacing the remote version.",
 									action: "push" as const,
 								},
 							]
@@ -55,7 +62,8 @@ export async function showSyncResolution(
 								{
 									id: "pull",
 									label: pullLabel(state),
-									description: "Review exact local changes and create a backup before applying.",
+									description:
+										"Review exact local changes and create a backup before applying.",
 									action: "pull" as const,
 								},
 							]
@@ -85,7 +93,9 @@ export async function showSyncResolution(
 		decision: SyncDecision,
 		actionSignal: AbortSignal,
 	) {
-		const signal = sessionSignal ? AbortSignal.any([sessionSignal, actionSignal]) : actionSignal;
+		const signal = sessionSignal
+			? AbortSignal.any([sessionSignal, actionSignal])
+			: actionSignal;
 		const config = await loadConfig(decision.setupName);
 		if (signal.aborted) return { kind: "close" as const };
 		if (syncConfigReviewIdentity(config) !== decision.configIdentity) {
@@ -123,7 +133,9 @@ export async function showSyncResolution(
 			resolvedDirection = direction;
 			return { kind: "close" as const };
 		}
-		return result.kind === "closed" ? { kind: "close" as const } : { kind: "stay" as const };
+		return result.kind === "closed"
+			? { kind: "close" as const }
+			: { kind: "stay" as const };
 	}
 
 	const result = await runMenu(ctx, menu, {
@@ -132,9 +144,11 @@ export async function showSyncResolution(
 		isCurrent: () => !sessionSignal?.aborted,
 		onError: (_menuCtx, error) => ctx.ui.notify(errorMessage(error), "error"),
 	});
-	if (sessionSignal?.aborted || result.kind === "stale") return { kind: "stale" };
+	if (sessionSignal?.aborted || result.kind === "stale")
+		return { kind: "stale" };
 	if (chainedResult) return { kind: "route-result", ...chainedResult };
-	if (resolvedDirection) return { kind: "resolved", direction: resolvedDirection };
+	if (resolvedDirection)
+		return { kind: "resolved", direction: resolvedDirection };
 	if (result.kind === "closed") {
 		return result.reason === "back" ? { kind: "back" } : { kind: "closed" };
 	}
@@ -142,7 +156,9 @@ export async function showSyncResolution(
 }
 
 function resolutionTitle(decision: SyncDecision) {
-	return decision.kind === "remote-empty" ? "Remote is empty" : "Resolve sync conflict";
+	return decision.kind === "remote-empty"
+		? "Remote is empty"
+		: "Resolve sync conflict";
 }
 
 function resolutionLines(decision: SyncDecision) {
@@ -155,22 +171,34 @@ function resolutionLines(decision: SyncDecision) {
 
 function causeSummary(decision: SyncDecision) {
 	if (decision.kind === "first-sync-settings-diverged") {
-		return ["This machine and the remote have different Pi settings on first sync."];
+		return [
+			"This machine and the remote have different Pi settings on first sync.",
+		];
 	}
 	if (decision.kind === "first-sync-sessions-diverged") {
-		return ["Pi settings match, but local and remote sessions differ on first sync."];
+		return [
+			"Pi settings match, but local and remote sessions differ on first sync.",
+		];
 	}
-	if (decision.kind === "remote-empty") return ["The remote storage location has no snapshot."];
+	if (decision.kind === "remote-empty")
+		return ["The remote storage location has no snapshot."];
 	return [
-		...(decision.causes.localChanged ? ["Local content changed since the last sync."] : []),
-		...(decision.causes.remoteChanged ? ["Remote content changed since the last sync."] : []),
-		...(decision.causes.policyChanged ? ["Included content changed since the last sync."] : []),
+		...(decision.causes.localChanged
+			? ["Local content changed since the last sync."]
+			: []),
+		...(decision.causes.remoteChanged
+			? ["Remote content changed since the last sync."]
+			: []),
+		...(decision.causes.policyChanged
+			? ["Included content changed since the last sync."]
+			: []),
 	];
 }
 
 function pushLabel(decision: SyncDecision) {
 	if (decision.kind === "remote-empty") return "Push local content…";
-	if (decision.kind.startsWith("first-sync-")) return "Use local as initial source…";
+	if (decision.kind.startsWith("first-sync-"))
+		return "Use local as initial source…";
 	return "Keep local content and replace remote…";
 }
 

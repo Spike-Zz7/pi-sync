@@ -3,8 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
-import { LOCK_GUARD_STALE_MS } from "./lock-policy.js";
-import { LOCKFILE_FS_ADAPTER } from "./lockfile-fs.js";
+import { LOCK_GUARD_STALE_MS, LOCKFILE_FS_ADAPTER } from "./lock.js";
 
 const CANONICAL_DIRECTORY_NAME = "pi-sync";
 const LEGACY_DIRECTORY_NAME = ".pisync";
@@ -47,10 +46,15 @@ export function stateDirectoryMigrationNotice() {
 	return "Legacy pi-sync state is still stored in .pisync. Close other Pi sessions, then run /sync migrate-state to move it to pi-sync/.";
 }
 
-export async function withStateDirectoryAccess<T>(fn: () => Promise<T>): Promise<T> {
+export async function withStateDirectoryAccess<T>(
+	fn: () => Promise<T>,
+): Promise<T> {
 	const roots = inspectStateRoots();
 	if (!roots.legacy) return fn();
-	return runWithStateDirectoryGuard(await acquireSharedStateDirectoryGuard(), fn);
+	return runWithStateDirectoryGuard(
+		await acquireSharedStateDirectoryGuard(),
+		fn,
+	);
 }
 
 export async function migrateLegacyStateDirectory(): Promise<StateDirectoryPreparation> {
@@ -87,6 +91,9 @@ export async function migrateLegacyStateDirectory(): Promise<StateDirectoryPrepa
 			};
 		}
 		guard.throwIfCompromised();
+		// Legacy processes do not share this guard; do not replace a root that
+		// appeared while we were awaiting the legacy lock probes.
+		inspectStateRoots();
 		await fs.rename(legacyStateDir(), canonicalStateDir());
 		guard.throwIfCompromised();
 		inspectStateRoots();
@@ -162,7 +169,10 @@ async function acquireStateDirectoryGuard(): Promise<StateDirectoryGuard> {
 	};
 }
 
-async function runWithStateDirectoryGuard<T>(guard: StateDirectoryGuard, fn: () => Promise<T>) {
+async function runWithStateDirectoryGuard<T>(
+	guard: StateDirectoryGuard,
+	fn: () => Promise<T>,
+) {
 	let result: T | undefined;
 	let failed = false;
 	let failure: unknown;
@@ -218,7 +228,9 @@ function isDirectoryRoot(directory: string, label: string) {
 			);
 		}
 		if (!entry.isDirectory()) {
-			throw new Error(`${label} pi-sync state path is not a directory: ${directory}`);
+			throw new Error(
+				`${label} pi-sync state path is not a directory: ${directory}`,
+			);
 		}
 		return true;
 	} catch (error) {

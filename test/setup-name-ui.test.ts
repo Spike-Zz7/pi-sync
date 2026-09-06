@@ -11,8 +11,8 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { test } from "vitest";
 import { createMockContext } from "../../../test/support.js";
 import { readLocalConfigObject } from "../src/config.js";
+import { promptInitialSetupName } from "../src/git-ui.js";
 import { showSetupWizard } from "../src/manager-ui.js";
-import { promptInitialSetupName } from "../src/setup-name-ui.js";
 import { withTempHome } from "./helpers.js";
 
 initTheme("dark", false);
@@ -63,9 +63,15 @@ test.each([
 		assert.equal(await promptInitialSetupName(ctx), "default");
 		assert.equal(submitted, true);
 		assert.ok(lines.every((line) => visibleWidth(line) <= width));
-		const text = stripVTControlCharacters(lines.join(" ")).replace(/\s+/gu, " ");
+		const text = stripVTControlCharacters(lines.join(" ")).replace(
+			/\s+/gu,
+			" ",
+		);
 		assert.match(text, /Sync setup name/u);
-		assert.match(text, /For example: home or work\. Leave blank for default\./u);
+		assert.match(
+			text,
+			/For example: home or work\. Leave blank for default\./u,
+		);
 		assert.doesNotMatch(text, /Git branches|automatic sync/u);
 		const heading = lines.find((line) => line.includes("Sync setup name"));
 		const guidance = lines.find((line) => line.includes("For example:"));
@@ -126,7 +132,7 @@ test("Pi core name input cancellation does not accept the default", async () => 
 	assert.equal(cancelled, true);
 });
 
-const presets = ["Cloudflare R2", "Other S3-compatible storage", "WebDAV", "Git"];
+const presets = ["Git"];
 const invalidCommonNames = [
 	"__proto__",
 	"prototype",
@@ -193,7 +199,7 @@ test.each(invalidCases)(
 			assert.match(titles[0], /^Sync setup name/u);
 			assert.equal(titles[1], titles[0]);
 			assert.doesNotMatch(titles[2], /^Sync setup name/u);
-			assert.equal(selectCalls, 1);
+			assert.equal(selectCalls, 0);
 			assert.equal(notifications.length, 1);
 			assert.equal(notifications[0].level, "warning");
 			assert.match(notifications[0].message, /Enter another name/u);
@@ -206,9 +212,19 @@ test.each(invalidCases)(
 );
 
 const validCases = [
-	...presets.flatMap((preset) => independentNames.map((name) => ({ preset, name }))),
 	...presets.flatMap((preset) =>
-		["default", "team/work", "-work", "refs/work", "@", "工作", "a".repeat(100)].map((name) => ({
+		independentNames.map((name) => ({ preset, name })),
+	),
+	...presets.flatMap((preset) =>
+		[
+			"default",
+			"team/work",
+			"-work",
+			"refs/work",
+			"@",
+			"工作",
+			"a".repeat(100),
+		].map((name) => ({
 			preset,
 			name,
 		})),
@@ -237,7 +253,11 @@ test.each(validCases)(
 	},
 );
 
-test.each(presets.flatMap((preset) => [false, true].map((abort) => ({ preset, abort }))))(
+test.each(
+	presets.flatMap((preset) =>
+		[false, true].map((abort) => ({ preset, abort })),
+	),
+)(
 	"$preset name correction cancellation (abort=$abort) never advances setup",
 	async ({ preset, abort }) => {
 		await withTempHome(async () => {
@@ -248,12 +268,18 @@ test.each(presets.flatMap((preset) => [false, true].map((abort) => ({ preset, ab
 				hasUI: true,
 				mode: "tui",
 				select: async () => preset,
-				input: async (title: string, _placeholder?: string, options?: { signal?: AbortSignal }) => {
+				input: async (
+					title: string,
+					_placeholder?: string,
+					options?: { signal?: AbortSignal },
+				) => {
 					titles.push(title);
 					signals.push(options?.signal);
 					if (titles.length === 1) return "__proto__";
 					if (abort) {
-						controller.abort(new DOMException("Session shut down", "AbortError"));
+						controller.abort(
+							new DOMException("Session shut down", "AbortError"),
+						);
 						return "default";
 					}
 					return undefined;
