@@ -6,12 +6,11 @@ import {
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { runCustomInteraction } from "@narumitw/pi-tui-kit";
 import { safeTerminalText } from "./manager-helpers.js";
-import type { SetupPullOutcome } from "./setup-switch.js";
 import type { SyncDecision } from "./sync-decision.js";
 import type { RemoteSelectionDecision } from "./sync-policy.js";
 
 export type RunRouteResult =
-	| { kind: "completed"; outcome?: SetupPullOutcome }
+	| { kind: "completed"; outcome?: "applied" | "cancelled" | "diverged" }
 	| { kind: "decision-required"; decision: SyncDecision }
 	| { kind: "remote-selection-required"; decision: RemoteSelectionDecision }
 	| { kind: "failed" };

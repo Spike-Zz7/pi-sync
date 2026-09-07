@@ -1,11 +1,8 @@
 import { agentDir } from "./config.js";
-import { isStaleLock, type LockInspection } from "./lock.js";
-import { errorMessage } from "./manager-helpers.js";
 
 export { errorMessage } from "./manager-helpers.js";
 
 import type {
-	BackendDiagnostic,
 	PublicationCapability,
 	RemoteHead,
 	SyncBackend,
@@ -106,25 +103,6 @@ export function formatPullSummary(
 		`Protected live sessions: ${protectedSessionCount || "none"}`,
 		formatApplyPreview(local, remote),
 		"A local backup is created before these writes/deletes. The remote active snapshot is unchanged.",
-	].join("\n");
-}
-
-export function formatRollbackSummary(
-	config: CommonSyncConfig,
-	destination: string,
-	local: Snapshot,
-	remote: Snapshot,
-	requestedSnapshot: string,
-	protectedSessionCount: number,
-) {
-	return [
-		`Sync setup: ${safeTerminalText(config.setupName)}`,
-		`Storage location: ${safeTerminalText(destination)}`,
-		`Snapshot: ${safeTerminalText(requestedSnapshot)}`,
-		`Sessions: ${remote.syncSessions ? "included — may contain private conversations" : "not included"}`,
-		`Protected live sessions: ${protectedSessionCount || "none"}`,
-		formatApplyPreview(local, remote),
-		"A local backup is created before applying; the backend's active head will change.",
 	].join("\n");
 }
 
@@ -231,109 +209,6 @@ export function formatStatusSummary(
 	return { text, level };
 }
 
-export function formatDoctorMessages(
-	config: CommonSyncConfig | undefined,
-	backend: SyncBackend | undefined,
-	local: Snapshot | undefined,
-	secrets: readonly string[],
-	lock: LockInspection | undefined,
-	guardHeld: boolean,
-	warnings: readonly string[] = [],
-	error?: unknown,
-	diagnostics: readonly BackendDiagnostic[] = [],
-): { messages: string[]; text: string; level: "info" | "warning" } {
-	const messages: string[] = [];
-	let level: "info" | "warning" = "info";
-
-	if (config) {
-		messages.push(
-			`config: ok (sync setup ${config.setupName})`,
-			`included content: ${config.include.join(", ") || "none"}`,
-			`sessions: ${config.include.includes("sessions") ? "included" : "excluded"}`,
-		);
-		if (warnings.length > 0) {
-			level = "warning";
-			messages.push(...warnings);
-		}
-	} else if (error) {
-		level = "warning";
-		messages.push(`config: ${errorMessage(error)}`);
-	}
-
-	if (local) {
-		if (secrets.length > 0) {
-			level = "warning";
-			messages.push("secret scan: possible secrets found:");
-			messages.push(...secrets.map((secret) => `- ${secret}`));
-		} else {
-			messages.push(`secret scan: ok (${local.files.length} files checked)`);
-		}
-	}
-
-	if (lock?.status === "valid" && isStaleLock(lock.lock)) {
-		level = "warning";
-		messages.push(
-			`lock: stale (pid ${lock.lock.pid}); run /sync unlock after verifying no sync is running`,
-		);
-	} else if (lock?.status === "valid") {
-		messages.push(
-			`lock: held by pid ${lock.lock.pid} since ${lock.lock.startedAt}`,
-		);
-	} else if (lock?.status === "unreadable") {
-		level = "warning";
-		messages.push(
-			"lock: unreadable; use /sync unlock --stale only after verifying no sync is running",
-		);
-	} else if (guardHeld) {
-		level = "warning";
-		messages.push(
-			"lock: guard active while metadata is missing or still being initialized",
-		);
-	} else if (lock) {
-		messages.push("lock: free");
-	}
-
-	if (backend) {
-		messages.push(
-			`storage location: ${safeTerminalText(backend.destination)}`,
-			`publication safety: ${publicationCapabilityDescription(backend.capability)}`,
-		);
-		for (const diagnostic of diagnostics) {
-			messages.push(diagnostic.message);
-			if (diagnostic.level !== "info") level = "warning";
-		}
-	}
-
-	return { messages, text: messages.join("\n"), level };
-}
-
-export function formatDiffSummary(
-	config: CommonSyncConfig,
-	backend: Pick<SyncBackend, "destination">,
-	local: Snapshot,
-	remote: Snapshot | undefined,
-	selectionState: RemoteSelectionState | undefined,
-	warnings: readonly string[] = [],
-): { text: string; level: "info" | "warning" } {
-	const header = [
-		`sync setup: ${config.setupName}`,
-		`storage connection: ${config.connectionName}`,
-		`storage location: ${safeTerminalText(backend.destination)}`,
-		`included content: ${config.include.join(", ") || "none"}`,
-		`sessions: ${config.include.includes("sessions") ? "included" : "excluded"}`,
-		formatRemoteSelectionStatus(selectionState),
-		...warnings,
-	].join("\n");
-	const level =
-		warnings.length > 0 || selectionState?.kind === "different"
-			? "warning"
-			: "info";
-	const diffBody = !remote
-		? formatSnapshotOnlyDiff("Remote is empty. Local push would upload", local)
-		: formatDiff(local, remote);
-	return { text: `${header}\n\n${diffBody}`, level };
-}
-
 export function formatPolicyChangeDetails(decision: RemoteSelectionDecision) {
 	const diff = compareSyncInclude(
 		decision.localInclude,
@@ -421,18 +296,6 @@ export function formatLegacySummary(
 	discovered: readonly string[],
 ) {
 	return `Remote snapshot for “${safeTerminalText(config.setupName)}” has no portable synced-content list; ${discovered.length} safe path${discovered.length === 1 ? " was" : "s were"} discovered, but the result is partial and read-only.`;
-}
-
-export function formatSnapshotHistoryLabel(
-	item: {
-		createdAt: string;
-		machine: string;
-		snapshotId: string;
-		syncSessions?: boolean;
-	},
-	isCurrent: boolean,
-) {
-	return `${item.createdAt} · ${safeTerminalText(item.machine)} · ${item.snapshotId}${isCurrent ? " (current)" : ""}${item.syncSessions ? " · sessions" : ""}`;
 }
 
 export function continueLabel(origin: "settings" | "sync" | "pull" | "push") {

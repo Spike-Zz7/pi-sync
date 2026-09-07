@@ -18,7 +18,6 @@ import {
 import { expectedRemoteHead } from "../src/sync-backend.js";
 import { SyncDecisionRequiredError } from "../src/sync-decision.js";
 import { pull, push, status, syncBoth } from "../src/sync-operations.js";
-import { RemoteSelectionMismatchError } from "../src/sync-policy.js";
 import type { CommandOptions, Snapshot } from "../src/types.js";
 import { snapshot, v3GitSettings, withTempHome } from "./helpers.js";
 import { MemorySyncBackend } from "./memory-sync-backend.js";
@@ -33,7 +32,7 @@ const options: CommandOptions = {
 	args: [],
 };
 
-test("sync and pull pause without mutation when remote included content differs", async () => {
+test("sync and pull stop on differing first-sync content without expanding local selection", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
 		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
@@ -60,15 +59,12 @@ test("sync and pull pause without mutation when remote included content differs"
 
 		for (const operation of [
 			() => syncBoth(ctx, { ...options, auto: true }, () => backend),
-			() => pull(ctx, { ...options, force: true }, () => backend),
+			() => pull(ctx, options, () => backend),
 		]) {
-			await assert.rejects(operation(), RemoteSelectionMismatchError);
+			await assert.rejects(operation(), SyncDecisionRequiredError);
 		}
 		await status(ctx, options, () => backend);
-		assert.match(
-			notifications.at(-1)?.message ?? "",
-			/remote included content: differs/i,
-		);
+		assert.match(notifications.at(-1)?.message ?? "", /pi-sync: diverged/i);
 		assert.equal(
 			readFileSync(path.join(agentDir, "settings.json"), "utf8"),
 			'{"local":true}\n',
@@ -78,7 +74,7 @@ test("sync and pull pause without mutation when remote included content differs"
 	});
 });
 
-test("ordinary push checks a differing head policy even when legacy state matches its snapshot", async () => {
+test("ordinary push preserves unselected remote content despite differing selection metadata", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
 		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()), {
@@ -114,14 +110,15 @@ test("ordinary push checks a differing head policy even when legacy state matche
 		const headBefore = await backend.readHead();
 		const { ctx } = createMockContext({ hasUI: true, mode: "tui" });
 
-		await assert.rejects(
-			push(ctx, options, undefined, () => backend),
-			RemoteSelectionMismatchError,
-		);
-		assert.equal((await backend.readHead())?.revision, headBefore?.revision);
-		assert.deepEqual(
-			(await backend.readSnapshot(remote.id)).selection,
-			remote.selection,
+		await push(ctx, options, undefined, () => backend);
+		const headAfter = await backend.readHead();
+		assert.notEqual(headAfter?.revision, headBefore?.revision);
+		assert.ok(headAfter);
+		const uploaded = await backend.readSnapshot(headAfter.snapshotRef);
+		assert.equal(
+			uploaded.files.find((file) => file.path === "pi-starship.toml")
+				?.contentBase64,
+			Buffer.from("remote-only\n").toString("base64"),
 		);
 	});
 });
@@ -432,8 +429,8 @@ test("first sync reports different sessions as an initial-source decision", asyn
 			syncBoth(ctx, options, () => backend),
 			(error: unknown) => {
 				assert.ok(error instanceof SyncDecisionRequiredError);
-				assert.equal(error.decision.kind, "first-sync-sessions-diverged");
-				assert.match(error.decision.review, /sessions differ/u);
+				assert.equal(error.decision.kind, "first-sync-settings-diverged");
+				assert.match(error.message, /no common baseline/u);
 				return true;
 			},
 		);
@@ -521,3 +518,79 @@ function namedSnapshot(id: string, content: string): Snapshot {
 		id,
 	};
 }
+
+test("pull and syncBoth ignore active session changes when checking divergence", async () => {
+	await withTempHome(async (agentDir) => {
+		mkdirSync(path.join(agentDir, "sessions"), { recursive: true });
+		writeFileSync(
+			localConfigPath(),
+			JSON.stringify(v3GitSettings({ include: ["settings.json", "sessions"] })),
+			{ mode: 0o600 },
+		);
+		writeFileSync(path.join(agentDir, "settings.json"), '{"base":true}\n');
+		const activeSessionPath = path.join(agentDir, "sessions", "active.jsonl");
+		writeFileSync(activeSessionPath, '{"type":"session","id":"active"}\n');
+
+		const backend = new MemorySyncBackend();
+		const sessionManager = {
+			getSessionFile: () => activeSessionPath,
+			getSessionDir: () => path.join(agentDir, "sessions"),
+		};
+		const { ctx: pushCtx } = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			sessionManager,
+		});
+		await push(pushCtx, options, undefined, () => backend);
+
+		// Remote changes settings.json
+		const remoteHead = await backend.readHead();
+		const remoteSnapshot: Snapshot = {
+			...snapshot([
+				{
+					path: "settings.json",
+					content: Buffer.from('{"remote":"updated"}\n'),
+				},
+				{
+					path: "sessions/active.jsonl",
+					content: Buffer.from('{"type":"session","id":"active"}\n'),
+				},
+			]),
+			id: "remote-update",
+			syncSessions: true,
+			selection: {
+				version: 1,
+				include: ["settings.json", "sessions"],
+			},
+		};
+		await backend.publishSnapshot(
+			remoteSnapshot,
+			expectedRemoteHead(remoteHead),
+		);
+
+		// User in active session writes a new message locally
+		writeFileSync(
+			activeSessionPath,
+			'{"type":"session","id":"active"}\n{"type":"message","text":"hello"}\n',
+		);
+
+		const { ctx: pullCtx } = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			sessionManager,
+		});
+
+		// Pull should succeed without throwing both-changed!
+		const outcome = await pull(pullCtx, options, () => backend);
+		assert.equal(outcome, "applied");
+		assert.equal(
+			readFileSync(path.join(agentDir, "settings.json"), "utf8"),
+			'{"remote":"updated"}\n',
+		);
+		// Active session was protected and kept local content
+		assert.equal(
+			readFileSync(activeSessionPath, "utf8"),
+			'{"type":"session","id":"active"}\n{"type":"message","text":"hello"}\n',
+		);
+	});
+});

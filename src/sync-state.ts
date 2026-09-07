@@ -16,12 +16,46 @@ import type { Snapshot, SyncState } from "./types.js";
 
 type SyncPolicyConfig = SyncSelectionConfig;
 
+export type ContentSyncStatus =
+	| "synced"
+	| "local ahead"
+	| "remote ahead"
+	| "diverged";
+
+export function contentSyncStatus(
+	local: Snapshot,
+	remote: Snapshot | undefined,
+	state: SyncState,
+	config: SyncPolicyConfig,
+	ignoredPaths = new Set<string>(),
+): ContentSyncStatus {
+	// A disappeared branch is not an authoritative empty snapshot.
+	if (!remote && state.lastAppliedSnapshot) return "diverged";
+	const localHashes = withoutHashPaths(fileHashMap(local), ignoredPaths);
+	const remoteHashes = remote
+		? withoutHashPaths(fileHashMap(remote), ignoredPaths)
+		: {};
+	if (sameHashes(localHashes, remoteHashes)) return "synced";
+	if (!state.lastAppliedSnapshot) {
+		if (Object.keys(localHashes).length === 0) return "remote ahead";
+		if (Object.keys(remoteHashes).length === 0) return "local ahead";
+		return "diverged";
+	}
+	const localChanged = hasLocalChanges(local, state, config, ignoredPaths);
+	const remoteChanged = remote
+		? hasRemoteChanges(remote, state, config, ignoredPaths)
+		: false;
+	if (localChanged && remoteChanged) return "diverged";
+	return localChanged ? "local ahead" : "remote ahead";
+}
+
 export function hasLocalChanges(
 	local: Snapshot,
 	state: SyncState,
 	config: SyncPolicyConfig,
+	ignoredPaths = new Set<string>(),
 ) {
-	return !sameHashes(fileHashMap(local), stateHashMapForConfig(state, config));
+	return !snapshotHashesMatchState(local, state, config, ignoredPaths);
 }
 
 export function remoteChangedSinceState(
@@ -51,11 +85,6 @@ export function hasRemoteChanges(
 	config: SyncPolicyConfig,
 	ignoredPaths = new Set<string>(),
 ) {
-	if (
-		remote.id === state.lastAppliedSnapshot &&
-		!syncPolicyChanged(state, config)
-	)
-		return false;
 	return !snapshotHashesMatchState(
 		filterSnapshotForConfigPolicy(remote, config),
 		state,
@@ -183,25 +212,4 @@ export function settingsHashMapFromState(state: SyncState) {
 
 export function settingsHashesMatchState(remote: Snapshot, state: SyncState) {
 	return sameHashes(settingsHashMap(remote), settingsHashMapFromState(state));
-}
-
-export function canPullRemoteSettingsOnFirstSync(
-	local: Snapshot,
-	remote: Snapshot,
-) {
-	const remoteSettings = settingsHashMap(remote);
-	return Object.entries(settingsHashMap(local)).every(
-		([filePath, hash]) => remoteSettings[filePath] === hash,
-	);
-}
-
-export function canPullRemoteSessionsOnFirstSync(
-	local: Snapshot,
-	remote: Snapshot,
-) {
-	const localSessions = sessionHashMap(local);
-	const remoteSessions = sessionHashMap(remote);
-	return Object.entries(localSessions).every(
-		([filePath, hash]) => remoteSessions[filePath] === hash,
-	);
 }

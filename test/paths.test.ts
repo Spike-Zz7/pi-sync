@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import path from "node:path";
 import { test } from "vitest";
-import { sessionStorageRoot } from "../src/paths.js";
+import { isDeniedPath, sessionStorageRoot, toPosix } from "../src/paths.js";
+
+test("toPosix normalizes backslashes to forward slashes across all platforms", () => {
+	assert.equal(toPosix("dir\\subdir\\file.txt"), "dir/subdir/file.txt");
+	assert.equal(isDeniedPath("dir\\.git\\config"), true);
+	assert.equal(isDeniedPath("dir\\node_modules\\pkg"), true);
+});
 
 test("sessionStorageRoot expands home without a HOME environment variable", () => {
 	const previous = process.env.HOME;

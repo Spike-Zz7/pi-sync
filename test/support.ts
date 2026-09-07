@@ -27,6 +27,7 @@ export function createMockContext(options: any = {}) {
 		hasUI: options.hasUI ?? true,
 		mode: options.mode ?? "tui",
 		cwd: options.cwd ?? process.cwd(),
+		sessionManager: options.sessionManager,
 		ui: {
 			theme: options.theme ?? {
 				fg: (_color: string, text: string) => text,

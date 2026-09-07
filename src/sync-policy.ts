@@ -31,7 +31,7 @@ export const PRIMARY_CATEGORIES = [
 		label: "Preferences",
 		paths: ["settings.json", "keybindings.json"] as const,
 		description:
-			"Global settings and key shortcuts (settings.json, keybindings.json)",
+			"全局设置、已安装插件清单与快捷键 (settings.json [包含已装插件 packages], keybindings.json)",
 	},
 	{
 		id: "category:instructions-prompts",

@@ -5,8 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { test, vi } from "vitest";
-import { createMockContext, createMockPi } from "../../../test/support.js";
+import { test } from "vitest";
+import { createMockContext } from "../../../test/support.js";
+import { parseOptions } from "../src/command.js";
 import {
 	configuredSessionDir,
 	ensureStateDir,
@@ -15,17 +16,16 @@ import {
 	lockPath,
 	readState,
 } from "../src/config.js";
-import { GitSyncBackend } from "../src/git-backend.js";
 import {
+	inspectLock,
 	isStaleLock,
 	lockFileExists,
 	readLock,
+	unlock,
 	withLock,
 } from "../src/lock.js";
-import sync, {
+import {
 	appliedFileHashMap,
-	canPullRemoteSessionsOnFirstSync,
-	canPullRemoteSettingsOnFirstSync,
 	filterSnapshotForConfigPolicy,
 	hasRemoteChanges,
 	isEnabled,
@@ -43,7 +43,6 @@ import { backupLocal } from "../src/sync-operations.js";
 import {
 	requiredConfig,
 	snapshot,
-	v3GitSettings,
 	withEnv,
 	withTempHome,
 	writeOldLock,
@@ -303,67 +302,6 @@ test("settings hash maps ignore session differences for first sync checks", () =
 	);
 });
 
-test("first sync only auto-pulls remote files when local files are not at risk", () => {
-	const settings = { path: "settings.json", content: Buffer.from("settings") };
-	const appendSystem = {
-		path: "APPEND_SYSTEM.md",
-		content: Buffer.from("append"),
-	};
-	const changedSettings = {
-		path: "settings.json",
-		content: Buffer.from("changed"),
-	};
-	const remoteOnly = snapshot([
-		{ path: "sessions/--project--/remote.jsonl", content: Buffer.from("r") },
-	]);
-	const shared = {
-		path: "sessions/--project--/shared.jsonl",
-		content: Buffer.from("same"),
-	};
-	const changed = {
-		path: "sessions/--project--/shared.jsonl",
-		content: Buffer.from("changed"),
-	};
-
-	assert.equal(
-		canPullRemoteSettingsOnFirstSync(
-			snapshot([settings]),
-			snapshot([settings, appendSystem]),
-		),
-		true,
-	);
-	assert.equal(
-		canPullRemoteSettingsOnFirstSync(
-			snapshot([settings]),
-			snapshot([changedSettings]),
-		),
-		false,
-	);
-	assert.equal(
-		canPullRemoteSettingsOnFirstSync(
-			snapshot([appendSystem]),
-			snapshot([settings]),
-		),
-		false,
-	);
-	assert.equal(
-		canPullRemoteSessionsOnFirstSync(snapshot([]), remoteOnly),
-		true,
-	);
-	assert.equal(
-		canPullRemoteSessionsOnFirstSync(snapshot([shared]), snapshot([shared])),
-		true,
-	);
-	assert.equal(
-		canPullRemoteSessionsOnFirstSync(snapshot([shared]), remoteOnly),
-		false,
-	);
-	assert.equal(
-		canPullRemoteSessionsOnFirstSync(snapshot([changed]), snapshot([shared])),
-		false,
-	);
-});
-
 test("snapshotWithoutSessions clears session opt-in even when no session files exist", () => {
 	const source = {
 		...snapshot([{ path: "settings.json", content: Buffer.from("{}") }]),
@@ -448,7 +386,16 @@ test("protected session apply plans keep the live session file", () => {
 		syncSessions: true,
 		extraFiles: [],
 	};
-	assert.equal(hasRemoteChanges(remote, protectedState, config), false);
+	assert.equal(hasRemoteChanges(remote, protectedState, config), true);
+	assert.equal(
+		hasRemoteChanges(
+			remote,
+			protectedState,
+			config,
+			new Set(["sessions/--project--/live.jsonl"]),
+		),
+		false,
+	);
 
 	const advancedRemote = { ...remote, id: "advanced" };
 	assert.equal(hasRemoteChanges(advancedRemote, protectedState, config), true);
@@ -582,8 +529,6 @@ test("old lock metadata is stale even if its PID is currently active", () => {
 test("old unreadable locks require explicit stale unlock before recovery", async () => {
 	await withTempHome(async () => {
 		await ensureStateDir();
-		const mock = createMockPi();
-		sync(mock.pi);
 		const { ctx } = createMockContext({ hasUI: true });
 
 		for (const contents of ["", "{not valid json"]) {
@@ -598,7 +543,7 @@ test("old unreadable locks require explicit stale unlock before recovery", async
 			assert.equal(ran, false);
 			assert.equal(await lockFileExists(), true);
 
-			await mock.commands.get("sync")?.handler("unlock --stale", ctx);
+			await unlock(ctx, parseOptions(["--stale"]));
 			assert.equal(await lockFileExists(), false);
 			assert.equal(await withLock("test", async () => "ok"), "ok");
 		}
@@ -659,15 +604,13 @@ test("unlock keeps a fresh unreadable lock unless stale removal is explicit", as
 	await withTempHome(async () => {
 		await ensureStateDir();
 		writeFileSync(lockPath(), "");
-		const mock = createMockPi();
-		sync(mock.pi);
 		const { ctx, notifications } = createMockContext({ hasUI: true });
 
-		await mock.commands.get("sync")?.handler("unlock", ctx);
+		await unlock(ctx, parseOptions([]));
 		assert.equal(await lockFileExists(), true);
 		assert.match(notifications.at(-1)?.message ?? "", /unreadable/);
 
-		await mock.commands.get("sync")?.handler("unlock --stale", ctx);
+		await unlock(ctx, parseOptions(["--stale"]));
 		assert.equal(await lockFileExists(), false);
 		assert.match(notifications.at(-1)?.message ?? "", /Removed unreadable/);
 	});
@@ -696,10 +639,8 @@ test("stale unlock rechecks unreadable metadata before removing it", async () =>
 		}) as typeof fs.readFile;
 
 		try {
-			const mock = createMockPi();
-			sync(mock.pi);
 			const { ctx, notifications } = createMockContext({ hasUI: true });
-			await mock.commands.get("sync")?.handler("unlock --stale", ctx);
+			await unlock(ctx, parseOptions(["--stale"]));
 
 			assert.equal(await lockFileExists(), true);
 			assert.match(notifications.at(-1)?.message ?? "", /not stale|still live/);
@@ -726,11 +667,9 @@ test("unlock cannot remove the lock for an active guarded sync", async () => {
 		});
 		await started;
 
-		const mock = createMockPi();
-		sync(mock.pi);
 		const { ctx, notifications } = createMockContext({ hasUI: true });
 		try {
-			await mock.commands.get("sync")?.handler("unlock --stale", ctx);
+			await unlock(ctx, parseOptions(["--stale"]));
 			assert.equal(await lockFileExists(), true);
 			assert.match(notifications.at(-1)?.message ?? "", /currently running/);
 		} finally {
@@ -754,11 +693,9 @@ test("unlock reports when a dead owner's guard is still expiring", async () => {
 			}),
 		);
 		mkdirSync(`${lockPath()}.guard`);
-		const mock = createMockPi();
-		sync(mock.pi);
 		const { ctx, notifications } = createMockContext({ hasUI: true });
 
-		await mock.commands.get("sync")?.handler("unlock --stale", ctx);
+		await unlock(ctx, parseOptions(["--stale"]));
 		assert.equal(await lockFileExists(), true);
 		assert.match(
 			notifications.at(-1)?.message ?? "",
@@ -835,40 +772,13 @@ test("readLock treats empty, whitespace, and corrupt lock files as absent", asyn
 	});
 });
 
-test("doctor warns when lock metadata is unreadable", async () => {
+test("inspectLock detects unreadable, dead owner, live and free states", async () => {
 	await withTempHome(async () => {
 		await ensureStateDir();
 		writeFileSync(lockPath(), "{broken");
-		const mock = createMockPi();
-		sync(mock.pi);
-		const { ctx, notifications } = createMockContext({ hasUI: true });
+		const unreadable = await inspectLock();
+		assert.equal(unreadable.status, "unreadable");
 
-		await mock.commands.get("sync")?.handler("doctor", ctx);
-		assert.match(notifications.at(-1)?.message ?? "", /lock: unreadable/);
-		assert.equal(notifications.at(-1)?.level, "warning");
-	});
-});
-
-test("doctor warns when a lock guard is active without metadata", async () => {
-	await withTempHome(async () => {
-		await ensureStateDir();
-		mkdirSync(`${lockPath()}.guard`);
-		const mock = createMockPi();
-		sync(mock.pi);
-		const { ctx, notifications } = createMockContext({ hasUI: true });
-
-		await mock.commands.get("sync")?.handler("doctor", ctx);
-		assert.match(
-			notifications.at(-1)?.message ?? "",
-			/lock: guard active.*metadata/,
-		);
-		assert.equal(notifications.at(-1)?.level, "warning");
-	});
-});
-
-test("doctor warns when a valid lock owner has exited", async () => {
-	await withTempHome(async () => {
-		await ensureStateDir();
 		writeFileSync(
 			lockPath(),
 			JSON.stringify({
@@ -878,20 +788,10 @@ test("doctor warns when a valid lock owner has exited", async () => {
 				startedAt: new Date().toISOString(),
 			}),
 		);
-		const mock = createMockPi();
-		sync(mock.pi);
-		const { ctx, notifications } = createMockContext({ hasUI: true });
+		const stale = await inspectLock();
+		assert.equal(stale.status, "valid");
+		assert.equal(isStaleLock(stale.lock), true);
 
-		await mock.commands.get("sync")?.handler("doctor", ctx);
-		assert.match(notifications.at(-1)?.message ?? "", /lock: stale.*unlock/);
-		assert.equal(notifications.at(-1)?.level, "warning");
-	});
-});
-
-test("doctor reports live and free lock states", async () => {
-	await withTempHome(async () => {
-		await ensureStateDir();
-		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()));
 		writeFileSync(
 			lockPath(),
 			JSON.stringify({
@@ -901,24 +801,13 @@ test("doctor reports live and free lock states", async () => {
 				startedAt: new Date().toISOString(),
 			}),
 		);
-		const mock = createMockPi();
-		sync(mock.pi);
-		const { ctx, notifications } = createMockContext({ hasUI: true });
+		const live = await inspectLock();
+		assert.equal(live.status, "valid");
+		assert.equal(isStaleLock(live.lock), false);
 
-		// Lock diagnostics are local; do not make this test depend on GitHub.
-		const diagnose = vi
-			.spyOn(GitSyncBackend.prototype, "diagnose")
-			.mockResolvedValue([]);
-		try {
-			await mock.commands.get("sync")?.handler("doctor", ctx);
-			assert.match(notifications.at(-1)?.message ?? "", /lock: held by pid/);
-
-			await fs.rm(lockPath());
-			await mock.commands.get("sync")?.handler("doctor", ctx);
-			assert.match(notifications.at(-1)?.message ?? "", /lock: free/);
-		} finally {
-			diagnose.mockRestore();
-		}
+		await fs.rm(lockPath());
+		const free = await inspectLock();
+		assert.equal(free.status, "missing");
 	});
 });
 

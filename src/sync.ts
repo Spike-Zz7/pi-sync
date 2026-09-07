@@ -26,8 +26,6 @@ export {
 } from "./snapshot-apply.js";
 export { default, type SyncDependencies } from "./sync-extension.js";
 export {
-	canPullRemoteSessionsOnFirstSync,
-	canPullRemoteSettingsOnFirstSync,
 	hasRemoteChanges,
 	sessionHashMap,
 	settingsHashesMatchState,

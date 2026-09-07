@@ -43,7 +43,7 @@ export function legacyStateDir() {
 export function stateDirectoryMigrationNotice() {
 	const roots = inspectStateRoots();
 	if (!roots.legacy) return undefined;
-	return "Legacy pi-sync state is still stored in .pisync. Close other Pi sessions, then run /sync migrate-state to move it to pi-sync/.";
+	return "Legacy pi-sync state is still stored in .pisync. Close other Pi sessions, then run /sync setup to move it to pi-sync/.";
 }
 
 export async function withStateDirectoryAccess<T>(

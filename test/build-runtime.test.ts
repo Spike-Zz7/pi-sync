@@ -54,12 +54,8 @@ test("generated runtime preserves every first-use import boundary", async () => 
 		});
 		const { eagerInputs } = builder.validateEagerGraph(metadata);
 		for (const lazyInput of [
-			"src/setup-switch.ts",
 			"src/sync-operations.ts",
-			"src/manager-ui.ts",
-			"src/manager-result-dispatcher.ts",
 			"src/file-selection.ts",
-			"src/remote-selection-ui.ts",
 			"src/git-backend.ts",
 		]) {
 			assert.equal(
@@ -142,11 +138,11 @@ test("generated runtime is mapped, external, self-contained, and loadable by Pi"
 			},
 		});
 		try {
-			await command.handler("init", ctx);
+			await command.handler("setup", ctx);
 			assert.ok(
 				titles.some(
 					(title) =>
-						title.includes("Git branch for sync snapshots") ||
+						title.includes("Git repository") ||
 						title.includes("Git remote URL"),
 				),
 				titles.join("\n"),

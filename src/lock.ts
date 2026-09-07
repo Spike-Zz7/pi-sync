@@ -75,7 +75,7 @@ export async function withLock<T>(
 		if (inspection.status === "valid" && isStaleLock(inspection.lock)) {
 			if (!options.reclaimStale) {
 				throw new Error(
-					`pi-sync lock is stale (pid ${inspection.lock.pid}). Run /sync unlock --stale, then retry.`,
+					`pi-sync lock is stale (pid ${inspection.lock.pid}). Run /sync setup, then retry.`,
 				);
 			}
 			guard.throwIfCompromised();
@@ -99,7 +99,7 @@ export async function withLock<T>(
 		}
 		if (inspection.status === "unreadable") {
 			throw new Error(
-				"pi-sync lock metadata is unreadable. Run /sync unlock --stale after verifying no sync is running.",
+				"pi-sync lock metadata is unreadable. Run /sync setup after verifying no sync is running.",
 			);
 		}
 
@@ -230,7 +230,7 @@ async function unlockGuarded(
 	if (inspection.status === "unreadable") {
 		if (!options.stale) {
 			ctx.ui.notify(
-				"Pi-sync lock metadata is unreadable. Use /sync unlock --stale only after verifying no sync is running.",
+				"Pi-sync lock metadata is unreadable. Use /sync setup only after verifying no sync is running.",
 				"warning",
 			);
 			return;

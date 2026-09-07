@@ -23,12 +23,8 @@ const GENERATED_BANNER = [
 ].join("\n");
 
 const FORBIDDEN_EAGER_INPUTS = [
-	"src/setup-switch.ts",
 	"src/sync-operations.ts",
-	"src/manager-ui.ts",
-	"src/manager-result-dispatcher.ts",
 	"src/file-selection.ts",
-	"src/remote-selection-ui.ts",
 	"src/git-backend.ts",
 ];
 const FORBIDDEN_EAGER_EXTERNALS = ["@narumitw/pi-tui-kit"];

@@ -42,7 +42,7 @@ test("snapshot preserves selected paths that are currently missing", async () =>
 	});
 });
 
-test("snapshot automatically generates and includes token-usage.jsonl from sessions", async () => {
+test("refreshTokenUsageLedger generates token-usage.jsonl from sessions without snapshot side effects", async () => {
 	await withTempHome(async (agentDir) => {
 		mkdirSync(agentDir, { recursive: true });
 		const sessionsDir = path.join(agentDir, "sessions", "work");
@@ -66,18 +66,34 @@ test("snapshot automatically generates and includes token-usage.jsonl from sessi
 		});
 		writeFileSync(path.join(sessionsDir, "session.jsonl"), `${sessionLine}\n`);
 
-		const snapshot = await createSnapshot("home", {
+		// createSnapshot must remain purely observational and must not create token-usage.jsonl
+		const initialSnapshot = await createSnapshot("home", {
 			include: ["token-usage.jsonl"],
 			sessionDir: path.join(agentDir, "sessions"),
 		});
+		assert.strictEqual(
+			initialSnapshot.files.some((f) => f.path === "token-usage.jsonl"),
+			false,
+		);
 
-		assert.ok(snapshot.files.some((f) => f.path === "token-usage.jsonl"));
+		// Explicit helper call updates/generates the file when requested
+		const { refreshTokenUsageLedger } = await import("../src/snapshot.js");
+		await refreshTokenUsageLedger(path.join(agentDir, "sessions"));
+
 		const ledgerContent = readFileSync(
 			path.join(agentDir, "token-usage.jsonl"),
 			"utf8",
 		);
 		assert.match(ledgerContent, /auto-token-msg-1/u);
 		assert.match(ledgerContent, /claude-3-5-sonnet/u);
+
+		const snapshotWithFile = await createSnapshot("home", {
+			include: ["token-usage.jsonl"],
+			sessionDir: path.join(agentDir, "sessions"),
+		});
+		assert.ok(
+			snapshotWithFile.files.some((f) => f.path === "token-usage.jsonl"),
+		);
 	});
 });
 

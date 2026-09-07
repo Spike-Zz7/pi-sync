@@ -72,7 +72,7 @@ export function parentPaths(relativePath: string) {
 }
 
 export function toPosix(value: string) {
-	return value.split(path.sep).join("/");
+	return value.replaceAll("\\", "/");
 }
 
 function trimSlashes(value: string) {

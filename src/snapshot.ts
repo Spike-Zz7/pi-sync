@@ -123,11 +123,6 @@ export async function createSnapshot(
 	options: SnapshotOptions = {},
 ): Promise<Snapshot> {
 	const include = effectiveInclude(options);
-	if (include.includes("token-usage.jsonl")) {
-		await refreshTokenUsageLedger(
-			options.sessionDir ?? (await configuredSessionDir()),
-		);
-	}
 	const syncSessions = include.includes("sessions");
 	const files = await collectFiles(agentDir(), {
 		include,

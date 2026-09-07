@@ -14,23 +14,19 @@ import {
 	syncSessionsWarnings,
 	writeStateForConfig,
 } from "./config.js";
-import { inspectLock, isLockGuardHeld, withLock } from "./lock.js";
 import {
 	createSnapshot,
 	filterSnapshotForConfigPolicy,
 	mergeRemotePreservedFiles,
-	regenerateSnapshotIdentity,
 	scanSnapshot,
 	sessionSnapshotPathFromAbsolute,
 	snapshotIncludesSessions,
-	snapshotWithoutSessions,
 } from "./snapshot.js";
 import { applySnapshot } from "./snapshot-apply.js";
 import { encodeSnapshot } from "./snapshot-codec.js";
 import {
 	createSyncBackend,
 	expectedRemoteHead,
-	type PublishSnapshotResult,
 	type RemoteHead,
 	readSnapshotForHead,
 	type SyncBackend,
@@ -40,31 +36,19 @@ import { createSyncDecision } from "./sync-decision.js";
 import {
 	countPreservedRemoteFiles,
 	errorMessage,
-	formatDiffSummary,
-	formatDoctorMessages,
 	formatPullSummary,
 	formatPushSummary,
-	formatRollbackSummary,
-	formatSnapshotHistoryLabel,
-	formatStatusSummary,
 	safeTerminalText,
 } from "./sync-format.js";
+import { inspectRemoteSelection } from "./sync-policy.js";
 import {
-	inspectRemoteSelection,
-	remoteSelectionMismatch,
-	requireCompatibleRemoteSelection,
-} from "./sync-policy.js";
-import {
-	canPullRemoteSessionsOnFirstSync,
-	canPullRemoteSettingsOnFirstSync,
+	contentSyncStatus,
 	fileHashMap,
 	hasLocalChanges,
-	hasRemoteChanges,
 	remoteChangedSinceState,
 	sameHashes,
 	shouldRefreshSyncedState,
 	snapshotHashesMatchState,
-	snapshotsMatch,
 	syncPolicyChanged,
 } from "./sync-state.js";
 import type {
@@ -77,8 +61,8 @@ import type {
 
 const STATUS_KEY = "sync";
 const VERSION = 1;
-const DEFAULT_PROFILE = "default";
-const POST_LOCAL_COMMIT_TIMEOUT_MS = 30_000;
+const _DEFAULT_PROFILE = "default";
+const _POST_LOCAL_COMMIT_TIMEOUT_MS = 30_000;
 
 export class PublicationStatePersistenceError extends Error {
 	constructor(
@@ -91,19 +75,6 @@ export class PublicationStatePersistenceError extends Error {
 			{ cause },
 		);
 		this.name = "PublicationStatePersistenceError";
-	}
-}
-
-export class RollbackPublicationError extends Error {
-	constructor(
-		readonly backupPath: string,
-		cause: unknown,
-	) {
-		super(
-			`Rollback applied locally with backup ${backupPath}, but remote publication failed: ${errorMessage(cause)}`,
-			{ cause },
-		);
-		this.name = "RollbackPublicationError";
 	}
 }
 
@@ -238,108 +209,37 @@ export async function status(
 	throwIfAborted(options.signal);
 	const state = await readStateForConfig(config);
 	throwIfAborted(options.signal);
-	const head = await backend.readHead(options.signal);
-	throwIfAborted(options.signal);
-	const selectionState = head
-		? inspectRemoteSelection(config.include, {
-				selection: head.selection,
-				files: [],
-			})
-		: undefined;
-	const localChanged = hasLocalChanges(local, state, config);
-	const remoteChanged = remoteChangedSinceState(
-		head,
-		state,
-		config,
-		(left, right) => backend.sameRevision(left, right),
-	);
-	ctx.ui.setStatus(STATUS_KEY, undefined);
-	const { text, level } = formatStatusSummary(
-		config,
-		backend,
-		local,
-		state,
-		head,
-		selectionState,
-		localChanged,
-		remoteChanged,
-		syncSessionsWarnings(config),
-	);
-	ctx.ui.notify(text, level);
-}
-
-export async function diff(
-	ctx: ExtensionCommandContext,
-	options: CommandOptions,
-	factory: SyncBackendFactory = createSyncBackend,
-) {
-	const config = await loadConfig(options.setup);
-	throwIfAborted(options.signal);
-	ctx.ui.setStatus(STATUS_KEY, `checking ${config.setupName}`);
-	const backend = await factory(config);
-	const local = await localSnapshotForContext(ctx, config);
-	throwIfAborted(options.signal);
-	const { snapshot: remote, selectionState } = await readRemoteSnapshot(
+	const { snapshot: remote } = await readRemoteSnapshot(
 		backend,
 		config,
 		options.signal,
-		{ allowSelectionDifference: true },
 	);
 	throwIfAborted(options.signal);
-	ctx.ui.setStatus(STATUS_KEY, undefined);
-	const { text, level } = formatDiffSummary(
-		config,
-		backend,
+	const result = contentSyncStatus(
 		local,
 		remote,
-		selectionState,
-		syncSessionsWarnings(config),
-	);
-	ctx.ui.notify(text, level);
-}
-
-export async function doctor(
-	ctx: ExtensionCommandContext,
-	options: CommandOptions,
-	factory: SyncBackendFactory = createSyncBackend,
-) {
-	let config: AnySyncConfig | undefined;
-	let backend: SyncBackend | undefined;
-	let configError: unknown;
-
-	try {
-		config = await loadConfig(options.setup);
-		throwIfAborted(options.signal);
-		backend = await factory(config);
-	} catch (error) {
-		throwIfAborted(options.signal);
-		configError = error;
-	}
-
-	const local = await createSnapshot(
-		config?.snapshotIdentity ?? DEFAULT_PROFILE,
-		config ? snapshotOptionsForContext(ctx, config) : {},
-	);
-	throwIfAborted(options.signal);
-	const lock = await inspectLock();
-	throwIfAborted(options.signal);
-	const guardHeld = lock.status === "missing" ? await isLockGuardHeld() : false;
-	throwIfAborted(options.signal);
-	const diagnostics = backend ? await backend.diagnose(options.signal) : [];
-	throwIfAborted(options.signal);
-
-	const { text, level } = formatDoctorMessages(
+		state,
 		config,
-		backend,
-		local,
-		scanSnapshot(local),
-		lock,
-		guardHeld,
-		config ? syncSessionsWarnings(config) : [],
-		configError,
-		diagnostics,
+		protectedSessionPaths(ctx),
 	);
-	ctx.ui.notify(text, level);
+	ctx.ui.setStatus(STATUS_KEY, undefined);
+	ctx.ui.notify(
+		[
+			`pi-sync: ${result}`,
+			`Repository: ${safeTerminalText(config.backend.profile.remote)}`,
+			`Branch: ${safeTerminalText(config.backend.destination.branch)}`,
+			`Path: ${safeTerminalText(config.storagePath)}`,
+			`Selected: ${config.include.map(safeTerminalText).join(", ") || "none"}`,
+			"Remote checked; no content or sync baseline changed.",
+			...(result === "diverged"
+				? [
+						"Sync stopped safely: reconcile the selected content before syncing; neither side will be overwritten.",
+					]
+				: []),
+			...syncSessionsWarnings(config),
+		].join("\n"),
+		result === "diverged" ? "warning" : "info",
+	);
 }
 
 export async function push(
@@ -380,8 +280,6 @@ export async function push(
 				options.signal,
 			);
 		}
-		if (remoteForUpload)
-			requireCompatibleRemoteSelection(config, remoteForUpload);
 		if (
 			remoteChangedSinceState(head, state, config, (left, right) =>
 				backend.sameRevision(left, right),
@@ -403,7 +301,7 @@ export async function push(
 					localChanged: hasLocalChanges(local, state, config),
 					remoteChanged: true,
 					directMessage:
-						"Remote or sync policy changed since last sync. Run /sync pull first or /sync push --force.",
+						"Remote content changed since last sync. Sync stopped safely; reconcile selected content before syncing.",
 				});
 			}
 		}
@@ -508,7 +406,13 @@ export async function pull(
 		options.signal,
 	);
 	throwIfAborted(options.signal);
-	const localChanged = hasLocalChanges(local, state, config);
+	const ignoredSessionPaths = protectedSessionPaths(ctx);
+	const localChanged = hasLocalChanges(
+		local,
+		state,
+		config,
+		ignoredSessionPaths,
+	);
 	if (!remote) {
 		throw createSyncDecision({
 			kind: "remote-empty",
@@ -522,17 +426,32 @@ export async function pull(
 		});
 	}
 
-	const remoteChanged = hasRemoteChanges(
+	if (
+		!options.force &&
+		!state.lastAppliedSnapshot &&
+		local.files.length &&
+		!sameHashes(fileHashMap(local), fileHashMap(remote))
+	) {
+		throw divergedDecision(
+			"first-sync-settings-diverged",
+			config,
+			state,
+			local,
+			remote,
+			"No common baseline and selected content differs. Sync stopped safely; reconcile the content before syncing.",
+		);
+	}
+
+	const direction = contentSyncStatus(
+		local,
 		remote,
 		state,
 		config,
-		protectedSessionPaths(ctx),
+		ignoredSessionPaths,
 	);
 	if (
-		localChanged &&
-		remoteChanged &&
-		state.lastAppliedSnapshot &&
-		!options.force
+		!options.force &&
+		(direction === "diverged" || direction === "local ahead")
 	) {
 		throw divergedDecision(
 			"both-changed",
@@ -540,7 +459,7 @@ export async function pull(
 			state,
 			local,
 			remote,
-			"Both local and remote changed since last sync. Run /sync diff, then choose /sync pull --force or /sync push --force.",
+			"Selected local content changed. Sync stopped safely rather than replacing it with remote content.",
 		);
 	}
 
@@ -606,7 +525,7 @@ export async function syncBoth(
 	if (config.include.length === 0) {
 		if (!options.silent) {
 			ctx.ui.notify(
-				`Sync setup “${config.setupName}” includes no files. Choose included content in /sync Settings before syncing.`,
+				`Sync setup “${config.setupName}” includes no files. Choose content in /sync setup before syncing.`,
 				"warning",
 			);
 		}
@@ -618,77 +537,41 @@ export async function syncBoth(
 		options.signal,
 	);
 	throwIfAborted(options.signal);
-	const localChanged = hasLocalChanges(local, state, config);
-	const remoteChanged = remote
-		? hasRemoteChanges(remote, state, config, protectedSessionPaths(ctx))
-		: false;
-	const firstSync = !state.lastAppliedSnapshot;
-	const markUpToDate = async (
-		remoteSnapshot: Snapshot,
-		message = "pi-sync is already up to date.",
-	) => {
-		await recordAppliedState(
-			config,
-			remoteSnapshot.id,
-			head?.revision,
-			fileHashMap(remoteSnapshot),
-		);
-		if (!options.silent) ctx.ui.notify(message, "info");
-	};
-
-	if (firstSync && remote?.files.length && local.files.length) {
-		if (!canPullRemoteSettingsOnFirstSync(local, remote)) {
-			throw divergedDecision(
-				"first-sync-settings-diverged",
-				config,
-				state,
-				local,
-				remote,
-				"Remote settings exist and this machine has different local Pi settings. Run /sync diff, then manually choose /sync pull or /sync push.",
-			);
-		}
-		if (!sameHashes(fileHashMap(local), fileHashMap(remote))) {
-			if (!canPullRemoteSessionsOnFirstSync(local, remote)) {
-				throw divergedDecision(
-					"first-sync-sessions-diverged",
-					config,
-					state,
-					local,
-					remote,
-					"Remote settings match, but local and remote Pi sessions differ. Run /sync diff, then manually choose /sync pull or /sync push.",
-				);
-			}
-			await pull(ctx, options, factory);
-			return;
-		}
-		await markUpToDate(
-			remote,
-			"pi-sync state initialized; local settings already match remote.",
-		);
-		return;
-	}
-	if (
-		localChanged &&
-		remoteChanged &&
-		remote &&
-		snapshotsMatch(local, remote)
-	) {
-		await markUpToDate(remote);
-		return;
-	}
-	if (localChanged && remoteChanged && state.lastAppliedSnapshot) {
+	const result = contentSyncStatus(
+		local,
+		remote,
+		state,
+		config,
+		protectedSessionPaths(ctx),
+	);
+	if (result === "diverged") {
 		throw divergedDecision(
-			"both-changed",
+			state.lastAppliedSnapshot
+				? "both-changed"
+				: "first-sync-settings-diverged",
 			config,
 			state,
 			local,
 			remote,
-			"Both local and remote changed. Run /sync diff and resolve with push --force or pull --force.",
+			"Sync diverged: selected content changed on both sides, no common baseline exists, or the remote branch disappeared. Nothing was overwritten. Reconcile the selected content before syncing.",
 		);
 	}
-	if (remoteChanged) return pull(ctx, options, factory);
-	if (localChanged || !remote) return push(ctx, options, undefined, factory);
+	const checkedFactory: SyncBackendFactory = (current) => {
+		if (
+			syncConfigReviewFingerprint(current) !==
+			syncConfigReviewFingerprint(config)
+		) {
+			throw new Error(
+				"Sync destination or selection changed during comparison. Run /sync again.",
+			);
+		}
+		return backend;
+	};
+	if (result === "remote ahead") return pull(ctx, options, checkedFactory);
+	if (result === "local ahead")
+		return push(ctx, options, undefined, checkedFactory);
 	if (
+		remote &&
 		shouldRefreshSyncedState(remote, head, state, config, (left, right) =>
 			backend.sameRevision(left, right),
 		)
@@ -700,153 +583,7 @@ export async function syncBoth(
 			fileHashMap(remote),
 		);
 	}
-	if (!options.silent) ctx.ui.notify("pi-sync is already up to date.", "info");
-}
-
-export async function history(
-	ctx: ExtensionCommandContext,
-	options: CommandOptions,
-	factory: SyncBackendFactory = createSyncBackend,
-) {
-	const config = await loadConfig(options.setup);
-	throwIfAborted(options.signal);
-	const backend = await factory(config);
-	const snapshots = (await backend.listHistory(options.signal))
-		.slice(-20)
-		.reverse();
-	throwIfAborted(options.signal);
-	if (snapshots.length === 0) {
-		ctx.ui.notify("No remote pi-sync history found.", "info");
-		return;
-	}
-
-	const currentSnapshot = snapshots[0]?.snapshotId;
-	if (ctx.mode === "tui") {
-		const labels = snapshots.map(
-			(item, index) =>
-				`${index + 1}. ${formatSnapshotHistoryLabel(item, item.snapshotId === currentSnapshot)}`,
-		);
-		const selected = await ctx.ui.select(
-			`History for sync setup “${safeTerminalText(config.setupName)}”\n\nChoose a snapshot to preview rollback.`,
-			[...labels, "Back"],
-		);
-		if (!selected || selected === "Back") return;
-		throwIfAborted(options.signal);
-		const snapshot = snapshots[labels.indexOf(selected)];
-		if (!snapshot) return;
-		await withLock("rollback", () =>
-			rollback(
-				ctx,
-				{ ...options, args: [snapshot.snapshotRef], yes: false },
-				factory,
-				{
-					backendIdentity: backend.identity,
-					setup: config.setupName,
-				},
-			),
-		);
-		return;
-	}
-	ctx.ui.notify(
-		snapshots
-			.map(
-				(item) =>
-					`${item.snapshotRef} ${item.createdAt} ${safeTerminalText(item.machine)}`,
-			)
-			.join("\n"),
-		"info",
-	);
-}
-
-export async function rollback(
-	ctx: ExtensionCommandContext,
-	options: CommandOptions,
-	factory: SyncBackendFactory = createSyncBackend,
-	expectedSelection?: { backendIdentity: string; setup?: string },
-) {
-	const target = options.args[0];
-	if (!target) throw new Error("Usage: /sync rollback <snapshot-id> [--yes]");
-
-	const config = await loadConfig(options.setup);
-	throwIfAborted(options.signal);
-	const backend = await factory(config);
-	if (
-		expectedSelection &&
-		(backend.identity !== expectedSelection.backendIdentity ||
-			config.setupName !== expectedSelection.setup)
-	) {
-		throw new Error(
-			"Sync setup or storage location changed while history was open; reopen history and retry.",
-		);
-	}
-	const decoded = await backend.readSnapshot(target, options.signal);
-	const selected = filterSnapshotForConfigPolicy(
-		config.include.includes("sessions")
-			? decoded
-			: snapshotWithoutSessions(decoded),
-		config,
-	);
-	const remote = regenerateSnapshotIdentity(selected);
-	const local = await localSnapshotForContext(ctx, config);
-	const expectedHead = await backend.readHead(options.signal);
-	throwIfAborted(options.signal);
-
-	if (
-		!(await confirmOperation(
-			ctx,
-			options,
-			"Rollback",
-			sessionAwareTitle("Rollback", remote),
-			formatRollbackSummary(
-				config,
-				backend.destination,
-				local,
-				remote,
-				target,
-				protectedSessionPaths(ctx).size,
-			),
-		))
-	) {
-		return;
-	}
-
-	throwIfAborted(options.signal);
-	const { backup, lastFileHashes } = await backupAndApplyRemote(
-		ctx,
-		config,
-		remote,
-		options,
-	);
-	let result: PublishSnapshotResult;
-	try {
-		const completionSignal = AbortSignal.timeout(POST_LOCAL_COMMIT_TIMEOUT_MS);
-		const upload = await snapshotForUpload(
-			backend,
-			config,
-			remote,
-			expectedHead,
-			undefined,
-			completionSignal,
-			{ ignoreUnreadableRemote: true },
-		);
-		result = await backend.publishSnapshot(
-			upload,
-			expectedRemoteHead(expectedHead),
-			{
-				signal: completionSignal,
-			},
-		);
-	} catch (error) {
-		throw new RollbackPublicationError(backup, error);
-	}
-	await persistPublicationState(config, result.head, lastFileHashes, backup);
-	if (options.signal?.aborted) return;
-	notifySnapshotResult(
-		ctx,
-		`Rolled back sync setup “${config.setupName}” to ${target}; latest: ${result.head.snapshotId}. Backup: ${backup}`,
-		result.warnings,
-	);
-	await maybeReload(ctx, options.signal);
+	if (!options.silent) ctx.ui.notify("pi-sync: synced.", "info");
 }
 
 function protectedSessionPaths(
@@ -945,24 +682,14 @@ async function readRemoteSnapshot(
 	backend: SyncBackend,
 	config: AnySyncConfig,
 	signal?: AbortSignal,
-	options: { allowSelectionDifference?: boolean } = {},
+	_options: { allowSelectionDifference?: boolean } = {},
 ) {
 	const head = await backend.readHead(signal);
 	if (!head)
 		return { head: undefined, snapshot: undefined, selectionState: undefined };
 	const snapshot = await readSnapshotForHead(backend, head, signal);
 	const selectionState = inspectRemoteSelection(config.include, snapshot);
-	if (
-		!options.allowSelectionDifference &&
-		selectionState.kind === "different"
-	) {
-		const configIdentity = syncConfigReviewFingerprint(config);
-		throw remoteSelectionMismatch(
-			config,
-			selectionState.include,
-			configIdentity,
-		);
-	}
+
 	return {
 		head,
 		snapshot: filterSnapshotForConfigPolicy(snapshot, config),
