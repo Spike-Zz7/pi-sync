@@ -94,11 +94,11 @@ It is an advanced private-file setting, not a normal UI toggle. Enable it only a
 
 New setups recommend and default to these 7 exact paths. Additional optional paths (`models.json`, `lsp.json`, `themes`, `extensions`, `sessions`) and safe agent-relative custom files or directories may also be included through the custom content flow. Absolute paths, `..`, backslashes, control characters, denied settings/state paths, duplicate case variants, and ambiguous nested paths under reserved roots are rejected.
 
-An empty array is valid but represents no useful transfer. Unselected content remains unmanaged locally and is preserved when republishing an existing remote snapshot.
+An empty array is valid. New strict snapshots still publish a shared policy/environment manifest. Never-managed content outside the selection remains unmanaged.
 
 `/sync setup` holds selection and destination edits in memory until the exact final review is confirmed. Cancelling does not save the draft or transfer content. RPC directs you to TUI for setup.
 
-Every new snapshot stores normalized selection metadata separately from files that happened to exist. Local selection is authoritative for this machine: remote selection differences do not expand it or block safe deselection. Push preserves remote unselected files. Deleting content that remains selected propagates in either direction; merely deselecting content never deletes it locally or remotely.
+New wire-v2 snapshots make normalized selection authoritative for the reviewed repository, branch and path. Binding/pulling adopts it with revision and local-config checks. Policy changes sync even without file changes. Withdrawing previously managed paths removes only exact recorded files, with backup/rollback and conflict checks; never-managed siblings are preserved. Legacy wire-v1 snapshots retain local-selection compatibility. See [strict environment](strict-environment.md) for mandatory package installation and resource portability.
 
 Older snapshots without an authoritative selection remain readable, but Pi Sync can only infer a partial list from safe remote file roots.
 

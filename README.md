@@ -14,8 +14,8 @@ For a local checkout, run `npm install && npm run build`, then `pi -e .`. The pa
 
 | Command | What it does |
 | --- | --- |
-| `/sync setup` | Select files/directories and review the exact Git repository, branch, and path before saving. No content is transferred. |
-| `/sync` | Fetch, compare selected content, and automatically push or pull safely. |
+| `/sync setup` | Review one repository, branch and path; adopt its shared content policy when binding. No content is transferred. |
+| `/sync` | Align shared files, skills and exact plugin versions, including required installation. |
 | `/sync status` | Fetch current remote content and show **synced**, **local ahead**, **remote ahead**, or **diverged**, without applying content or updating the sync baseline. |
 
 No manager, named-target switching, manual push/pull commands, or force-resolution flags are exposed. Startup and shutdown do not sync, even with legacy automatic-sync settings enabled. Setup requires TUI mode; sync and status work in TUI and RPC. Print/JSON modes are rejected because results would not be observable.
@@ -38,9 +38,17 @@ Direction is based on selected **file content**, not Git commit counts:
 - Only remote content changed: back up local content and transactionally pull.
 - Both sides changed differently: stop without overwriting either side. Reconcile the selected content independently, then retry. There is no force shortcut.
 
-Deleting a selected file propagates to the other side, including the last file in a selected directory. **Deselecting is not deletion:** local and remote deselected content remains untouched; later pushes preserve remote unselected files. Each machine's local selection determines its scope; remote selection metadata never silently expands it.
+Deleting a selected file propagates, including the last file in a directory. **New strict targets share one versioned selection policy.** Withdrawing previously managed files removes their exact recorded paths with backup/rollback; never-managed siblings and source package checkouts remain untouched. Policy edits participate in conflict detection.
 
-On first sync, an empty selected side can initialize from the nonempty side. Equal sides establish a baseline. **Different nonempty sides, even when one is a subset of the other, stop safely without a common baseline.** A previously synced branch disappearing is not treated as an authoritative empty snapshot and also stops safely.
+On first sync against a strict target, the receiving device adopts the target's selected files and required package environment, backing up replaced defaults. Legacy targets still stop on different nonempty sides without a common baseline. A previously synced branch disappearing is not an authoritative empty snapshot and stops safely.
+
+### Required skill and plugin restoration
+
+Custom skills include their full directories and assets; safe skill-root symlinks are materialized. npm/Git plugins are restored at installed exact versions/commits, with locked runtime dependencies. Local-path plugins and explicit external resource paths are bundled into portable managed storage. Package-provided skills stay with their package rather than becoming duplicate loose copies. Installation or verification failure is an incomplete sync, not success; retry with `/sync` after fixing the reported problem.
+
+**Binding a trusted target authorizes mandatory installation and package lifecycle hooks. Hooks run with your user permissions; staging is not a sandbox and arbitrary hook side effects cannot be rolled back.** No per-package optional-install toggle is used.
+
+The guarantee is the **active selected agent-global environment**, not the OS, credentials, project/CLI resources or every file on disk. Reload/restart Pi to activate restored extensions. New snapshots use wire v2/Git manifest v3; older clients fail closed. Legacy snapshots remain readable without a strict environment guarantee until upgraded. See [strict environment behavior, recovery and limitations](docs/strict-environment.md).
 
 ### Privacy and safety
 

@@ -190,7 +190,9 @@ test("public sync automatically commits Git changes, propagates deletions and st
 			assert.notEqual(second.revision, first.revision);
 			const uploaded = await backend.readSnapshot(second.snapshotRef);
 			assert.deepEqual(
-				uploaded.files.map(({ path: filePath }) => filePath),
+				uploaded.files
+					.filter((file) => file.path !== "sync-environment.json")
+					.map(({ path: filePath }) => filePath),
 				["preferences.txt"],
 			);
 			assert.equal(
@@ -202,7 +204,13 @@ test("public sync automatically commits Git changes, propagates deletions and st
 				"2",
 			);
 			await backend.publishSnapshot(
-				{ ...uploaded, id: "remote-delete", files: [] },
+				{
+					...uploaded,
+					id: "remote-delete",
+					files: uploaded.files.filter(
+						(file) => file.path === "sync-environment.json",
+					),
+				},
 				expectedRemoteHead(second),
 			);
 			const remote = await backend.readHead();

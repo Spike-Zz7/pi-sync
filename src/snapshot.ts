@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { agentDir, configuredSessionDir } from "./config.js";
+import { captureEnvironment, collectPortableDirectory } from "./environment.js";
 import {
 	isDeniedPath,
 	posixJoin,
@@ -126,9 +127,10 @@ export async function createSnapshot(
 	const syncSessions = include.includes("sessions");
 	const files = await collectFiles(agentDir(), {
 		include,
+		strictEnvironment: options.strictEnvironment,
 		sessionDir: options.sessionDir ?? (await configuredSessionDir()),
 	});
-	return {
+	const snapshot: Snapshot = {
 		version: VERSION,
 		id: snapshotId(),
 		createdAt: new Date().toISOString(),
@@ -138,6 +140,9 @@ export async function createSnapshot(
 		selection: selectionForSnapshot(include),
 		files,
 	};
+	return options.strictEnvironment
+		? captureEnvironment(snapshot, agentDir())
+		: snapshot;
 }
 
 interface TokenUsageRecord {
@@ -303,6 +308,26 @@ export async function collectFiles(
 	const selection = syncIncludeSelection(effectiveInclude(options));
 	const selectedFiles = new Set<string>(selection.builtIns);
 	for (const entry of entries) {
+		if (
+			options.strictEnvironment &&
+			entry.name === "skills" &&
+			selectedFiles.has("skills")
+		) {
+			const directory = path.join(root, "skills");
+			for (const name of (await fs.readdir(directory)).sort()) {
+				if (isDeniedPath(name)) continue;
+				const source = path.join(directory, name);
+				const stat = await fs.stat(source);
+				if (stat.isDirectory())
+					results.push(
+						...(await collectPortableDirectory(source, `skills/${name}`)),
+					);
+				else if (stat.isFile()) await addFile(results, root, `skills/${name}`);
+				else
+					throw new Error("Skill resource is not a regular file or directory.");
+			}
+			continue;
+		}
 		if (
 			entry.isDirectory() &&
 			TOP_LEVEL_DIRS.has(entry.name) &&

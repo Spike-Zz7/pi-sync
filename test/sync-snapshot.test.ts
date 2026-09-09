@@ -363,7 +363,9 @@ test("snapshot apply restores the complete prior state at every mutation boundar
 				if (
 					!injected &&
 					boundary.method === "writeFile" &&
-					String(args[0]) === path.join(agentDir, boundary.file)
+					String(args[0]).startsWith(
+						`${path.join(agentDir, boundary.file)}.sync-`,
+					)
 				) {
 					injected = true;
 					throw new Error(
@@ -459,7 +461,7 @@ test("snapshot apply restores a custom file when directory replacement fails", a
 		]);
 		const originalWriteFile = fs.writeFile;
 		fs.writeFile = (async (...args: Parameters<typeof fs.writeFile>) => {
-			if (String(args[0]) === childPath)
+			if (String(args[0]).startsWith(`${childPath}.sync-`))
 				throw new Error("injected custom child failure");
 			return originalWriteFile(...args);
 		}) as typeof fs.writeFile;
@@ -540,7 +542,11 @@ test("snapshot rollback removes new parent directories after a late write failur
 		const spy = vi
 			.spyOn(fs, "writeFile")
 			.mockImplementation(async (...args) => {
-				if (String(args[0]) === path.join(agentDir, "settings.json"))
+				if (
+					String(args[0]).startsWith(
+						`${path.join(agentDir, "settings.json")}.sync-`,
+					)
+				)
 					throw new Error("injected late write failure");
 				return writeFile(...args);
 			});
@@ -620,7 +626,11 @@ test("snapshot rollback removes a newly created external session root", async ()
 		const spy = vi
 			.spyOn(fs, "writeFile")
 			.mockImplementation(async (...args) => {
-				if (String(args[0]) === path.join(agentDir, "settings.json"))
+				if (
+					String(args[0]).startsWith(
+						`${path.join(agentDir, "settings.json")}.sync-`,
+					)
+				)
 					throw new Error("injected late write failure");
 				return writeFile(...args);
 			});

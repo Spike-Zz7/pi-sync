@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
+import { requireEnvironment } from "./environment.js";
 import {
 	portableSnapshotSelection,
 	snapshotSelectionInclude,
 } from "./sync-policy.js";
 import type { Snapshot, SnapshotSelection } from "./types.js";
 
-export const GIT_MANIFEST_VERSION = 2;
+export const GIT_MANIFEST_VERSION = 3;
 export const MAX_GIT_MANIFEST_BYTES = 1024 * 1024;
 export const MAX_GIT_TREE_OUTPUT_BYTES = 16 * 1024 * 1024;
 export const MAX_GIT_PAYLOAD_BYTES = 100 * 1024 * 1024;
@@ -13,6 +14,7 @@ export const MAX_GIT_SNAPSHOT_BYTES = 512 * 1024 * 1024;
 const SNAPSHOT_VERSION = 1;
 
 export interface GitManifestFile {
+	mode?: number;
 	path: string;
 	sha256: string;
 	size: number;
@@ -59,8 +61,10 @@ export function requireGitManifest(value: unknown): GitManifest {
 		);
 	}
 	if (
-		manifest.version !== GIT_MANIFEST_VERSION ||
-		manifest.snapshotVersion !== SNAPSHOT_VERSION ||
+		!(
+			(manifest.version === 2 && manifest.snapshotVersion === 1) ||
+			(manifest.version === 3 && manifest.snapshotVersion === 2)
+		) ||
 		typeof manifest.snapshotId !== "string" ||
 		manifest.snapshotId.length > 512 ||
 		!/^[A-Za-z0-9._-]+$/u.test(manifest.snapshotId) ||
@@ -110,7 +114,9 @@ export function requireGitManifest(value: unknown): GitManifest {
 				"path",
 				"sha256",
 				"size",
+				...(file.mode === undefined ? [] : ["mode"]),
 			]) ||
+			(file.mode !== undefined && file.mode !== 0o644 && file.mode !== 0o755) ||
 			!isSafeSnapshotPath(file.path) ||
 			typeof file.sha256 !== "string" ||
 			!/^[0-9a-f]{64}$/u.test(file.sha256) ||
@@ -161,7 +167,8 @@ export function validateGitSnapshot(
 				!expected ||
 				file.path !== expected.path ||
 				file.sha256 !== expected.sha256 ||
-				file.size !== expected.size
+				file.size !== expected.size ||
+				file.mode !== expected.mode
 			);
 		})
 	) {
@@ -173,8 +180,9 @@ export function validateGitSnapshot(
 
 export function prepareGitSnapshot(snapshot: Snapshot, namespace: string) {
 	snapshotSelectionInclude(snapshot);
+	requireEnvironment(snapshot);
 	if (
-		snapshot.version !== SNAPSHOT_VERSION ||
+		![SNAPSHOT_VERSION, 2].includes(snapshot.version) ||
 		typeof snapshot.id !== "string" ||
 		!snapshot.id ||
 		snapshot.id.length > 512 ||
@@ -197,6 +205,7 @@ export function prepareGitSnapshot(snapshot: Snapshot, namespace: string) {
 	let total = 0;
 	for (const file of snapshot.files) {
 		if (
+			(file.mode !== undefined && file.mode !== 0o644 && file.mode !== 0o755) ||
 			!isSafeSnapshotPath(file.path) ||
 			typeof file.contentBase64 !== "string" ||
 			typeof file.sha256 !== "string" ||
@@ -228,6 +237,7 @@ export function prepareGitSnapshot(snapshot: Snapshot, namespace: string) {
 			path: file.path,
 			sha256: file.sha256,
 			size: content.byteLength,
+			...(file.mode === undefined ? {} : { mode: file.mode }),
 			content,
 		});
 	}

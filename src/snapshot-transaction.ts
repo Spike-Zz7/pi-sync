@@ -4,6 +4,7 @@ import path from "node:path";
 import { agentDir, stateDir } from "./config.js";
 import { withLock } from "./lock.js";
 import { assertWithinRoot, isPathInside, sessionStorageRoot } from "./paths.js";
+import { withSyncSettingsLocks } from "./settings-lock.js";
 import type { SnapshotApplyPlan } from "./types.js";
 
 const JOURNAL_VERSION = 1;
@@ -23,7 +24,7 @@ interface TransactionJournal {
 	entries: TransactionEntry[];
 }
 
-export async function applySnapshotTransaction(
+async function applySnapshotTransactionUnlocked(
 	plan: SnapshotApplyPlan,
 	options: {
 		sessionDir?: string;
@@ -39,7 +40,15 @@ export async function applySnapshotTransaction(
 		for (const item of plan.writes) {
 			await options.beforeWrite?.(item.target);
 			await fs.mkdir(path.dirname(item.target), { recursive: true });
-			await fs.writeFile(item.target, item.content);
+			const temporary = `${item.target}.sync-${randomUUID()}`;
+			try {
+				await fs.writeFile(temporary, item.content, {
+					mode: item.mode ?? 0o600,
+				});
+				await fs.rename(temporary, item.target);
+			} finally {
+				await fs.rm(temporary, { force: true });
+			}
 		}
 		await fs.rm(transaction.directory, { recursive: true, force: true });
 	} catch (error) {
@@ -63,7 +72,7 @@ export async function recoverSnapshotTransactionsOnStartup() {
 	});
 }
 
-export async function recoverPendingSnapshotTransactions() {
+async function recoverPendingSnapshotTransactionsUnlocked() {
 	const directory = transactionRoot();
 	const entries = await pendingTransactionEntries();
 	for (const entry of entries.sort((left, right) =>
@@ -266,4 +275,19 @@ function assertAllowedTarget(
 
 function transactionRoot() {
 	return path.join(stateDir(), "transactions");
+}
+
+export function applySnapshotTransaction(
+	plan: SnapshotApplyPlan,
+	options: {
+		sessionDir?: string;
+		beforeWrite?: (target: string) => Promise<void>;
+	} = {},
+) {
+	return withSyncSettingsLocks(() =>
+		applySnapshotTransactionUnlocked(plan, options),
+	);
+}
+export function recoverPendingSnapshotTransactions() {
+	return withSyncSettingsLocks(recoverPendingSnapshotTransactionsUnlocked);
 }

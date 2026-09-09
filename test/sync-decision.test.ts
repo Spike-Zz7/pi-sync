@@ -169,10 +169,13 @@ test("reviewed force push keeps local selection and preserves remote unmanaged f
 			include: ["settings.json"],
 		});
 		assert.match(reviews.join("\n"), /replace the differing remote selection/i);
-		assert.deepEqual(published.files.map((file) => file.path).sort(), [
-			"pi-starship.toml",
-			"settings.json",
-		]);
+		assert.deepEqual(
+			published.files
+				.filter((file) => file.path !== "sync-environment.json")
+				.map((file) => file.path)
+				.sort(),
+			["pi-starship.toml", "settings.json"],
+		);
 	});
 });
 

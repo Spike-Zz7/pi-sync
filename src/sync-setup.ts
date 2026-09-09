@@ -1,17 +1,20 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
 	agentDir,
+	loadConfig,
 	localConfigTemplate,
 	readLocalConfigObject,
+	syncConfigReviewFingerprint,
 	updateLocalConfig,
 } from "./config.js";
+import { requireEnvironment } from "./environment.js";
 import { selectIncludedContent } from "./file-selection.js";
 import {
 	normalizeGitBranch,
 	normalizeGitDirectory,
 	normalizeGitRemote,
 } from "./git-config.js";
-import { inspectLock, isStaleLock, unlock } from "./lock.js";
+import { inspectLock, isStaleLock, unlock, withLock } from "./lock.js";
 import { safeTerminalText } from "./manager-helpers.js";
 import { singleTargetSetup } from "./single-target.js";
 import {
@@ -19,7 +22,15 @@ import {
 	stateDirectoryMigrationNotice,
 	withStateDirectoryAccess,
 } from "./state-directory.js";
-import { DEFAULT_SYNC_INCLUDE } from "./sync-policy.js";
+import {
+	createSyncBackend,
+	readSnapshotForHead,
+	type SyncBackendFactory,
+} from "./sync-backend.js";
+import {
+	DEFAULT_SYNC_INCLUDE,
+	snapshotSelectionInclude,
+} from "./sync-policy.js";
 
 export async function prepareSyncSetup(
 	ctx: ExtensionCommandContext,
@@ -85,6 +96,7 @@ export async function prepareSyncSetup(
 export async function showSyncSetup(
 	ctx: ExtensionCommandContext,
 	signal?: AbortSignal,
+	factory: SyncBackendFactory = createSyncBackend,
 ) {
 	if (ctx.mode !== "tui") {
 		ctx.ui.notify(
@@ -152,7 +164,7 @@ export async function showSyncSetup(
 
 	const agentDirectory = agentDir();
 	const remoteInput = await ctx.ui.input(
-		`Git repository (Source: ${safeTerminalText(agentDirectory)})\nDestination for syncing files from your local Pi directory. Uses existing SSH/Git credentials.`,
+		`Git repository (Source: ${safeTerminalText(agentDirectory)})\nDestination for your selected global Pi environment. Required package installation and lifecycle hooks run as your user; trust every writer. Uses existing SSH/Git credentials.`,
 		connection?.remote ?? "git@github.com:owner/private-pi-sync.git",
 		{ signal },
 	);
@@ -253,8 +265,55 @@ export async function showSyncSetup(
 			},
 		};
 	}, signal);
+	const boundInclude = await withLock("bind", () =>
+		bindSharedPolicy(name, signal, factory),
+	);
 	ctx.ui.notify(
-		`设置已自动保存！\n来源: ${safeTerminalText(agentDirectory)}\n目标: ${safeTerminalText(remote)} (${safeTerminalText(branch)}:${safeTerminalText(storagePath)})\n同步项: ${include.map(safeTerminalText).join(", ") || "none"}\n输入 /sync 即可开始同步。`,
+		`设置已自动保存！\n来源: ${safeTerminalText(agentDirectory)}\n目标: ${safeTerminalText(remote)} (${safeTerminalText(branch)}:${safeTerminalText(storagePath)})\n同步项: ${(boundInclude ?? include).map(safeTerminalText).join(", ") || "none"}\n输入 /sync 即可开始同步。`,
 		"info",
 	);
+}
+
+/** Binding adopts policy only; content and required installs happen together on /sync. */
+export async function bindSharedPolicy(
+	name: string,
+	signal?: AbortSignal,
+	factory: SyncBackendFactory = createSyncBackend,
+) {
+	const config = await loadConfig(name);
+	const backend = await factory(config);
+	const head = await backend.readHead(signal);
+	if (!head) return undefined;
+	const snapshot = await readSnapshotForHead(backend, head, signal);
+	requireEnvironment(snapshot);
+	if (snapshot.version !== 2) return undefined;
+	const include = snapshotSelectionInclude(snapshot) ?? config.include;
+	const refreshed = await backend.readHead(signal);
+	if (!refreshed || !backend.sameRevision(head.revision, refreshed.revision))
+		throw new Error("Remote changed while binding. Retry /sync setup.");
+	if (
+		syncConfigReviewFingerprint(await loadConfig(name)) !==
+		syncConfigReviewFingerprint(config)
+	)
+		throw new Error("Sync setup changed while binding. Retry setup.");
+	await updateLocalConfig((current) => {
+		const setup = current.syncSetups[name];
+		const connection = current.storageConnections[setup?.storage.connection];
+		if (
+			!setup ||
+			connection?.remote !== config.backend.profile.remote ||
+			setup.storage.branch !== config.backend.destination.branch ||
+			setup.storage.path !== config.storagePath ||
+			JSON.stringify(setup.sync.include) !== JSON.stringify(config.include)
+		)
+			throw new Error("Sync setup changed while binding. Retry setup.");
+		return {
+			...current,
+			syncSetups: {
+				...current.syncSetups,
+				[name]: { ...setup, sync: { ...setup.sync, include } },
+			},
+		};
+	}, signal);
+	return include;
 }

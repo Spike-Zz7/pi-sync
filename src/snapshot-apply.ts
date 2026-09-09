@@ -11,6 +11,7 @@ import {
 	safeJoin,
 	toPosix,
 } from "./paths.js";
+import { withSyncSettingsLocks } from "./settings-lock.js";
 import {
 	createSnapshot,
 	isSessionFilePath,
@@ -35,13 +36,16 @@ function fileHashMap(snapshot: Snapshot) {
 	);
 }
 
-export async function applySnapshot(
+async function applySnapshotUnlocked(
 	snapshot: Snapshot,
 	protectedRelativePaths = new Set<string>(),
 	options: Pick<
 		SnapshotOptions,
 		"include" | "sessionDir" | "syncFiles" | "syncSessions" | "extraFiles"
-	> = {},
+	> & {
+		additionalWrites?: SnapshotApplyPlan["writes"];
+		additionalDeletes?: string[];
+	} = {},
 ) {
 	const root = agentDir();
 	const { sessionDir } = options;
@@ -63,6 +67,42 @@ export async function applySnapshot(
 		),
 		snapshot,
 	);
+	if (options.additionalWrites) plan.writes.push(...options.additionalWrites);
+	if (options.additionalDeletes)
+		plan.deletes.push(...options.additionalDeletes);
+	for (const item of plan.writes) {
+		if (isPathInside(root, item.target)) {
+			let parent = path.dirname(item.target);
+			while (parent !== root && path.dirname(parent) !== root) {
+				try {
+					const stat = await fs.lstat(parent);
+					if (stat.isSymbolicLink()) {
+						plan.deletes.push(parent);
+					}
+				} catch (error) {
+					if (
+						(error as NodeJS.ErrnoException).code !== "ENOENT" &&
+						(error as NodeJS.ErrnoException).code !== "ENOTDIR"
+					)
+						throw error;
+				}
+				parent = path.dirname(parent);
+			}
+		}
+		try {
+			const stat = await fs.lstat(item.target);
+			if (stat.isSymbolicLink()) {
+				plan.deletes.push(item.target);
+			}
+		} catch (error) {
+			if (
+				(error as NodeJS.ErrnoException).code !== "ENOENT" &&
+				(error as NodeJS.ErrnoException).code !== "ENOTDIR"
+			)
+				throw error;
+		}
+	}
+	plan.deletes = [...new Set(plan.deletes)];
 	await preflightSnapshotMutations(root, plan, sessionDir);
 	await applySnapshotTransaction(plan, {
 		sessionDir,
@@ -84,7 +124,7 @@ export function preflightSnapshotApply(
 ): SnapshotApplyPlan {
 	const seenPaths = new Set<string>();
 	const remotePaths = new Set<string>();
-	const writes: Array<{ target: string; content: Buffer }> = [];
+	const writes: Array<{ target: string; content: Buffer; mode?: number }> = [];
 	const deletes: string[] = [];
 
 	for (const file of snapshot.files) {
@@ -104,7 +144,11 @@ export function preflightSnapshotApply(
 		const content = decodeBase64Strict(file.contentBase64, normalized);
 		if (sha256(content) !== file.sha256)
 			throw new Error(`Checksum mismatch in snapshot file: ${normalized}`);
-		writes.push({ target, content });
+		writes.push({
+			target,
+			content,
+			...(file.mode === undefined ? {} : { mode: file.mode }),
+		});
 	}
 
 	const deletePaths = new Set<string>();
@@ -263,7 +307,7 @@ async function prepareSnapshotWrite(
 	if (needsDeferredCheck) return;
 	try {
 		const stat = await fs.lstat(target);
-		if (stat.isSymbolicLink())
+		if (stat.isSymbolicLink() && !deletePaths.has(target))
 			throw new Error(
 				`Refusing to overwrite symlink during snapshot apply: ${target}`,
 			);
@@ -292,10 +336,12 @@ async function inspectSnapshotWriteParents(
 		current = path.join(current, part);
 		try {
 			const stat = await fs.lstat(current);
-			if (stat.isSymbolicLink())
+			if (stat.isSymbolicLink()) {
+				if (deletePaths.has(current)) return true;
 				throw new Error(
 					`Refusing to follow symlink during snapshot apply: ${current}`,
 				);
+			}
 			if (!stat.isDirectory()) {
 				if (deletePaths.has(current)) return true;
 				throw new Error(`Snapshot path parent is not a directory: ${current}`);
@@ -329,4 +375,10 @@ async function assertNoSymlinkParents(root: string, target: string) {
 			throw error;
 		}
 	}
+}
+
+export function applySnapshot(
+	...args: Parameters<typeof applySnapshotUnlocked>
+) {
+	return withSyncSettingsLocks(() => applySnapshotUnlocked(...args));
 }

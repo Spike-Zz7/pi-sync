@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -645,7 +646,9 @@ function configMutationLockPath() {
 	return `${localConfigPath()}.mutation-lock`;
 }
 
-export async function withLocalConfigFileLock<T>(
+const configLockContext = new AsyncLocalStorage<boolean>();
+
+async function withLocalConfigFileLockUnlocked<T>(
 	run: () => Promise<T>,
 ): Promise<T> {
 	const configPath = localConfigPath();
@@ -752,4 +755,11 @@ async function pathExists(filePath: string) {
 function recordConfigMigrationNotice(configPath: string, notice: string) {
 	if (!configMigrationNotices.has(configPath))
 		configMigrationNotices.set(configPath, notice);
+}
+
+export function withLocalConfigFileLock<T>(run: () => Promise<T>): Promise<T> {
+	if (configLockContext.getStore()) return run();
+	return withLocalConfigFileLockUnlocked(() =>
+		configLockContext.run(true, run),
+	);
 }

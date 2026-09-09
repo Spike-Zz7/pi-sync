@@ -1,5 +1,6 @@
 import path from "node:path";
 import { syncConfigReviewFingerprint } from "./config.js";
+import { environmentPath } from "./environment.js";
 import { safeTerminalText } from "./manager-helpers.js";
 import { isDeniedPath, toPosix } from "./paths.js";
 import type { AnySyncConfig, Snapshot, SnapshotSelection } from "./types.js";
@@ -444,6 +445,7 @@ export function isConfiguredSnapshotPath(
 	config: SyncSelectionConfig,
 	_legacyExtraFiles?: Set<string>,
 ) {
+	if (environmentPath(relativePath)) return true;
 	const normalized = toPosix(relativePath);
 	const selection = syncIncludeSelection(includeFromSelectionConfig(config));
 	if (normalized.startsWith("sessions/")) return selection.sessions;

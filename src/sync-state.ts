@@ -1,3 +1,4 @@
+import { environmentPath } from "./environment.js";
 import { toPosix } from "./paths.js";
 import {
 	canonicalSnapshotPathForConfig,
@@ -29,6 +30,21 @@ export function contentSyncStatus(
 	config: SyncPolicyConfig,
 	ignoredPaths = new Set<string>(),
 ): ContentSyncStatus {
+	// Legacy targets carry no environment contract. Compare their selected files only.
+	if (remote?.version === 1) {
+		local = {
+			...local,
+			files: local.files.filter((f) => !environmentPath(f.path)),
+		};
+		state = {
+			...state,
+			lastFileHashes: Object.fromEntries(
+				Object.entries(state.lastFileHashes).filter(
+					([p]) => !environmentPath(p),
+				),
+			),
+		};
+	}
 	// A disappeared branch is not an authoritative empty snapshot.
 	if (!remote && state.lastAppliedSnapshot) return "diverged";
 	const localHashes = withoutHashPaths(fileHashMap(local), ignoredPaths);

@@ -5,22 +5,38 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+	activeLocalConfigPath,
+	agentDir,
 	loadConfig,
+	readLocalConfigObject,
 	readStateForConfig,
 	sessionDirForApply,
 	sessionDirFromContext,
 	stateDir,
 	syncConfigReviewFingerprint,
 	syncSessionsWarnings,
+	validateSettingsDocument,
 	writeStateForConfig,
 } from "./config.js";
 import {
+	captureEnvironment,
+	digest,
+	type EnvironmentInstaller,
+	environmentPath,
+	prepareEnvironment,
+	requireEnvironment,
+} from "./environment.js";
+import { environmentInstaller } from "./environment-installer.js";
+import { withSyncSettingsLocks } from "./settings-lock.js";
+import {
 	createSnapshot,
 	filterSnapshotForConfigPolicy,
+	isConfiguredSnapshotPath,
 	mergeRemotePreservedFiles,
 	scanSnapshot,
 	sessionSnapshotPathFromAbsolute,
 	snapshotIncludesSessions,
+	snapshotTarget,
 } from "./snapshot.js";
 import { applySnapshot } from "./snapshot-apply.js";
 import { encodeSnapshot } from "./snapshot-codec.js";
@@ -40,7 +56,11 @@ import {
 	formatPushSummary,
 	safeTerminalText,
 } from "./sync-format.js";
-import { inspectRemoteSelection } from "./sync-policy.js";
+import {
+	inspectRemoteSelection,
+	sameSyncInclude,
+	snapshotSelectionInclude,
+} from "./sync-policy.js";
 import {
 	contentSyncStatus,
 	fileHashMap,
@@ -108,10 +128,10 @@ function localSnapshotForContext(
 	ctx: ExtensionCommandContext | ExtensionContext,
 	config: AnySyncConfig,
 ) {
-	return createSnapshot(
-		config.snapshotIdentity,
-		snapshotOptionsForContext(ctx, config),
-	);
+	return createSnapshot(config.snapshotIdentity, {
+		...snapshotOptionsForContext(ctx, config),
+		strictEnvironment: true,
+	});
 }
 
 async function backupAndApplyRemote(
@@ -119,24 +139,108 @@ async function backupAndApplyRemote(
 	config: AnySyncConfig,
 	remote: Snapshot,
 	options: CommandOptions,
+	installer: EnvironmentInstaller,
 ) {
-	const backup = await backupLocal(
-		config.snapshotIdentity,
-		snapshotOptionsForContext(ctx, config),
+	const materialized = await prepareEnvironment(
+		remote,
+		agentDir(),
+		installer,
 		options.signal,
 	);
-	const applySessionDir = await sessionDirForApply(ctx, remote);
-	throwIfAborted(options.signal);
-	options.onCommit?.();
-	const lastFileHashes = await applySnapshot(
-		remote,
-		protectedSessionPaths(ctx),
-		{
-			include: config.include,
-			sessionDir: applySessionDir,
-		},
-	);
-	return { backup, lastFileHashes };
+	return withSyncSettingsLocks(async () => {
+		const fresh = await loadConfig(options.setup);
+		if (
+			syncConfigReviewFingerprint(fresh) !== syncConfigReviewFingerprint(config)
+		)
+			throw new Error(
+				"Sync destination or selection changed during install. Run /sync again.",
+			);
+		const include =
+			remote.version === 2
+				? (snapshotSelectionInclude(remote) ?? config.include)
+				: config.include;
+		const state = await readStateForConfig(config);
+		const withdrawnPaths =
+			remote.version === 2
+				? Object.keys(state.lastFileHashes).filter(
+						(file) =>
+							!environmentPath(file) &&
+							!isConfiguredSnapshotPath(file, { include }),
+					)
+				: [];
+		for (const relative of withdrawnPaths) {
+			const target = snapshotTarget(
+				agentDir(),
+				relative,
+				sessionDirFromContext(ctx),
+			);
+			try {
+				const stat = await fs.lstat(target);
+				if (
+					!stat.isFile() ||
+					(!options.force &&
+						digest(await fs.readFile(target)) !==
+							state.lastFileHashes[relative])
+				)
+					throw new Error(
+						"Previously managed withdrawn content changed locally. Review it before retrying sync.",
+					);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+		}
+		const deletionInclude = include;
+		const backup = await backupLocal(
+			config.snapshotIdentity,
+			{
+				...snapshotOptionsForContext(ctx, config),
+				include: [...new Set([...include, ...(state.include ?? [])])].filter(
+					(item, _, all) =>
+						!all.some(
+							(parent) => parent !== item && item.startsWith(`${parent}/`),
+						),
+				),
+			},
+			options.signal,
+		);
+		const applySessionDir = await sessionDirForApply(ctx, remote);
+		const additionalWrites = [];
+		if (!sameSyncInclude(config.include, include)) {
+			const configTarget = await activeLocalConfigPath();
+			const currentConfig = await readLocalConfigObject();
+			if (!currentConfig) throw new Error("Missing pi-sync settings.");
+			const settings = structuredClone(currentConfig);
+			if (!settings.syncSetups[config.setupName]) {
+				throw new Error(`Sync setup “${config.setupName}” was not found.`);
+			}
+			settings.syncSetups[config.setupName].sync.include = include;
+			validateSettingsDocument(settings);
+			additionalWrites.push({
+				target: configTarget,
+				content: Buffer.from(`${JSON.stringify(settings, null, "\t")}\n`),
+			});
+		}
+		throwIfAborted(options.signal);
+		options.onCommit?.();
+		const hashes = await applySnapshot(
+			materialized,
+			protectedSessionPaths(ctx),
+			{
+				include: deletionInclude,
+				sessionDir: applySessionDir,
+				additionalWrites,
+				additionalDeletes: withdrawnPaths.map((file) =>
+					snapshotTarget(agentDir(), file, applySessionDir),
+				),
+			},
+		);
+		const appliedConfig = { ...config, include };
+		return {
+			backup,
+			config: appliedConfig,
+			lastFileHashes: remote.version === 2 ? fileHashMap(remote) : hashes,
+		};
+	});
 }
 
 function divergedDecision(
@@ -231,6 +335,9 @@ export async function status(
 			`Path: ${safeTerminalText(config.storagePath)}`,
 			`Selected: ${config.include.map(safeTerminalText).join(", ") || "none"}`,
 			"Remote checked; no content or sync baseline changed.",
+			remote?.version === 2
+				? "Strict shared scope: selected agent-global files, skills and packages; excludes project/CLI resources and OS tools."
+				: "Legacy/empty target: no strict environment guarantee until a v2 publication.",
 			...(result === "diverged"
 				? [
 						"Sync stopped safely: reconcile the selected content before syncing; neither side will be overwritten.",
@@ -247,6 +354,7 @@ export async function push(
 	options: CommandOptions,
 	input?: PushInput,
 	factory: SyncBackendFactory = createSyncBackend,
+	installer: EnvironmentInstaller = environmentInstaller,
 ) {
 	const config = input?.config ?? (await loadConfig(options.setup));
 	throwIfAborted(options.signal);
@@ -254,7 +362,9 @@ export async function push(
 	const backend = input?.backend ?? (await factory(config));
 	const state = input?.state ?? (await readStateForConfig(config));
 	throwIfAborted(options.signal);
-	const local = input?.local ?? (await localSnapshotForContext(ctx, config));
+	const local = input?.local
+		? await captureEnvironment(input.local, agentDir())
+		: await localSnapshotForContext(ctx, config);
 	throwIfAborted(options.signal);
 
 	let head = await backend.readHead(options.signal);
@@ -366,6 +476,7 @@ export async function push(
 		}
 	}
 
+	await prepareEnvironment(upload, agentDir(), installer, options.signal);
 	const result = await backend.publishSnapshot(
 		upload,
 		expectedRemoteHead(head),
@@ -374,13 +485,37 @@ export async function push(
 			onCommit: options.onCommit,
 		},
 	);
-	await persistPublicationState(config, result.head, fileHashMap(local));
+	try {
+		const hasWithdrawn = Object.keys(state.lastFileHashes).some(
+			(file) =>
+				!environmentPath(file) && !isConfiguredSnapshotPath(file, config),
+		);
+		if (requireEnvironment(local)?.packages.length || hasWithdrawn) {
+			const applied = await backupAndApplyRemote(
+				ctx,
+				config,
+				local,
+				options,
+				installer,
+			);
+			await persistPublicationState(
+				applied.config,
+				result.head,
+				applied.lastFileHashes,
+				applied.backup,
+			);
+		} else
+			await persistPublicationState(config, result.head, fileHashMap(local));
+	} catch (error) {
+		if (error instanceof PublicationStatePersistenceError) throw error;
+		throw new PublicationStatePersistenceError(result.head, error);
+	}
 	if (options.signal?.aborted) return;
 	ctx.ui.setStatus(STATUS_KEY, undefined);
 	if (!options.silent) {
 		notifySnapshotResult(
 			ctx,
-			`Pushed ${upload.files.length} files from sync setup “${config.setupName}” as ${result.head.snapshotId}.`,
+			`Pushed ${upload.files.filter((f) => !environmentPath(f.path)).length} files from sync setup “${config.setupName}” as ${result.head.snapshotId}.`,
 			result.warnings,
 		);
 	}
@@ -391,6 +526,7 @@ export async function pull(
 	ctx: ExtensionCommandContext | ExtensionContext,
 	options: CommandOptions,
 	factory: SyncBackendFactory = createSyncBackend,
+	installer: EnvironmentInstaller = environmentInstaller,
 ) {
 	const config = await loadConfig(options.setup);
 	throwIfAborted(options.signal);
@@ -429,7 +565,7 @@ export async function pull(
 	if (
 		!options.force &&
 		!state.lastAppliedSnapshot &&
-		local.files.length &&
+		local.files.some((f) => !environmentPath(f.path)) &&
 		!sameHashes(fileHashMap(local), fileHashMap(remote))
 	) {
 		throw divergedDecision(
@@ -482,13 +618,20 @@ export async function pull(
 	}
 
 	throwIfAborted(options.signal);
-	const { backup, lastFileHashes } = await backupAndApplyRemote(
-		ctx,
-		config,
-		remote,
-		options,
+	const refreshed = await backend.readHead(options.signal);
+	if (!sameRemoteHead(backend, head, refreshed))
+		throw new Error("Remote changed during pull review. Run /sync again.");
+	const {
+		backup,
+		lastFileHashes,
+		config: appliedConfig,
+	} = await backupAndApplyRemote(ctx, config, remote, options, installer);
+	await recordAppliedState(
+		appliedConfig,
+		remote.id,
+		head?.revision,
+		lastFileHashes,
 	);
-	await recordAppliedState(config, remote.id, head?.revision, lastFileHashes);
 	if (options.signal?.aborted) return "applied" as const;
 	ctx.ui.setStatus(STATUS_KEY, undefined);
 	if (!options.silent) {
@@ -514,6 +657,7 @@ export async function syncBoth(
 	ctx: ExtensionCommandContext | ExtensionContext,
 	options: CommandOptions,
 	factory: SyncBackendFactory = createSyncBackend,
+	installer: EnvironmentInstaller = environmentInstaller,
 ) {
 	const config = await loadConfig(options.setup);
 	throwIfAborted(options.signal);
@@ -537,13 +681,65 @@ export async function syncBoth(
 		options.signal,
 	);
 	throwIfAborted(options.signal);
-	const result = contentSyncStatus(
-		local,
-		remote,
-		state,
-		config,
-		protectedSessionPaths(ctx),
-	);
+	if (remote?.version === 2) {
+		const policy = snapshotSelectionInclude(remote) ?? config.include;
+		if (
+			!state.lastAppliedSnapshot ||
+			(!sameSyncInclude(config.include, policy) &&
+				sameSyncInclude(config.include, state.include ?? config.include))
+		) {
+			return pull(
+				ctx,
+				{ ...options, force: !state.lastAppliedSnapshot },
+				factory,
+				installer,
+			);
+		}
+		if (sameHashes(fileHashMap(local), fileHashMap(remote))) {
+			// Missing packages must be repaired even when the file baseline is current.
+			const materialized = await prepareEnvironment(
+				remote,
+				agentDir(),
+				installer,
+				options.signal,
+			);
+			const settings = materialized.files.find(
+				(f) => f.path === "settings.json",
+			);
+			if (
+				settings &&
+				(await fs.readFile(path.join(agentDir(), "settings.json"), "utf8")) !==
+					Buffer.from(settings.contentBase64, "base64").toString("utf8")
+			) {
+				const applied = await backupAndApplyRemote(
+					ctx,
+					config,
+					remote,
+					options,
+					installer,
+				);
+				await recordAppliedState(
+					applied.config,
+					remote.id,
+					head?.revision,
+					applied.lastFileHashes,
+				);
+			}
+		}
+	}
+	const result =
+		remote?.version === 2 &&
+		!sameSyncInclude(config.include, snapshotSelectionInclude(remote))
+			? sameSyncInclude(snapshotSelectionInclude(remote), state.include ?? [])
+				? "local ahead"
+				: "diverged"
+			: contentSyncStatus(
+					local,
+					remote,
+					state,
+					config,
+					protectedSessionPaths(ctx),
+				);
 	if (result === "diverged") {
 		throw divergedDecision(
 			state.lastAppliedSnapshot
@@ -567,9 +763,10 @@ export async function syncBoth(
 		}
 		return backend;
 	};
-	if (result === "remote ahead") return pull(ctx, options, checkedFactory);
+	if (result === "remote ahead")
+		return pull(ctx, options, checkedFactory, installer);
 	if (result === "local ahead")
-		return push(ctx, options, undefined, checkedFactory);
+		return push(ctx, options, undefined, checkedFactory, installer);
 	if (
 		remote &&
 		shouldRefreshSyncedState(remote, head, state, config, (left, right) =>
@@ -664,7 +861,9 @@ async function snapshotForUpload(
 			throw error;
 		}
 	}
-	return mergeRemotePreservedFiles(local, snapshot, config);
+	return local.version === 2 && snapshot.version === 2
+		? local
+		: mergeRemotePreservedFiles(local, snapshot, config);
 }
 
 function assertSafeUploadSnapshot(upload: Snapshot, config: AnySyncConfig) {
@@ -688,11 +887,17 @@ async function readRemoteSnapshot(
 	if (!head)
 		return { head: undefined, snapshot: undefined, selectionState: undefined };
 	const snapshot = await readSnapshotForHead(backend, head, signal);
+	requireEnvironment(snapshot);
 	const selectionState = inspectRemoteSelection(config.include, snapshot);
 
 	return {
 		head,
-		snapshot: filterSnapshotForConfigPolicy(snapshot, config),
+		snapshot: filterSnapshotForConfigPolicy(
+			snapshot,
+			snapshot.version === 2
+				? { include: snapshotSelectionInclude(snapshot) ?? config.include }
+				: config,
+		),
 		selectionState,
 	};
 }

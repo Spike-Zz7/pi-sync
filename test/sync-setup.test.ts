@@ -12,6 +12,7 @@ import { loadSingleTargetSetup } from "../src/single-target.js";
 import sync from "../src/sync-extension.js";
 import { prepareSyncSetup, showSyncSetup } from "../src/sync-setup.js";
 import { v3GitSettings, withTempHome } from "./helpers.js";
+import { MemorySyncBackend } from "./memory-sync-backend.js";
 import { createMockContext, createMockPi } from "./support.js";
 
 initTheme("dark", false);
@@ -50,7 +51,7 @@ function legacySettings() {
 test("setup saves one exact destination and selected paths without names or automatic policy prompts", async () => {
 	await withTempHome(async (agentDir) => {
 		const context = setupContext();
-		await showSyncSetup(context.ctx);
+		await showSyncSetup(context.ctx, undefined, () => new MemorySyncBackend());
 		const settings = await readLocalConfigObject();
 		assert.ok(settings);
 		assert.deepEqual(Object.keys(settings.syncSetups), ["default"]);
@@ -123,7 +124,7 @@ test("ambiguous legacy setups require explicit review once, preserving all other
 		const context = setupContext();
 		context.ctx.ui.select = async (title: string, values: string[]) =>
 			title.startsWith("Choose one legacy") ? values[1] : undefined;
-		await showSyncSetup(context.ctx);
+		await showSyncSetup(context.ctx, undefined, () => new MemorySyncBackend());
 		const saved = await readLocalConfigObject();
 		assert.ok(saved);
 		assert.equal(await loadSingleTargetSetup(), "work");
@@ -159,7 +160,7 @@ test("setup updates configuration directly", async () => {
 		mkdirSync(agentDir, { recursive: true });
 		writeFileSync(localConfigPath(), JSON.stringify(v3GitSettings()));
 		const context = setupContext();
-		await showSyncSetup(context.ctx);
+		await showSyncSetup(context.ctx, undefined, () => new MemorySyncBackend());
 		assert.equal(
 			(await readLocalConfigObject())?.storageConnections.origin.remote,
 			"git@github.com:example/new.git",

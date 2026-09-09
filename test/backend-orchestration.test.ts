@@ -179,10 +179,13 @@ test("forced fake-backend push re-reads the head and preserves newly observed un
 		const head = await backend.readHead();
 		assert.ok(head);
 		const published = await backend.readSnapshot(head.snapshotRef);
-		assert.deepEqual(published.files.map((file) => file.path).sort(), [
-			"AGENTS.md",
-			"settings.json",
-		]);
+		assert.deepEqual(
+			published.files
+				.filter((file) => file.path !== "sync-environment.json")
+				.map((file) => file.path)
+				.sort(),
+			["AGENTS.md", "settings.json"],
+		);
 	});
 });
 

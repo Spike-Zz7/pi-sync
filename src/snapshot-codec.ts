@@ -2,6 +2,7 @@ import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { createGunzip, gzip } from "node:zlib";
+import { requireEnvironment } from "./environment.js";
 import { snapshotSelectionInclude } from "./sync-policy.js";
 import type { Snapshot } from "./types.js";
 
@@ -42,10 +43,11 @@ export async function decodeSnapshot(
 	const parsed = JSON.parse(
 		Buffer.concat(chunks, total).toString("utf8"),
 	) as Snapshot;
-	if (parsed.version !== VERSION || !Array.isArray(parsed.files)) {
+	if (![VERSION, 2].includes(parsed.version) || !Array.isArray(parsed.files)) {
 		throw new Error("Unsupported snapshot format.");
 	}
 	snapshotSelectionInclude(parsed);
+	requireEnvironment(parsed);
 	return parsed;
 }
 

@@ -93,6 +93,7 @@ export interface PartialConfig {
 }
 
 export interface SnapshotFile {
+	mode?: number;
 	path: string;
 	contentBase64: string;
 	sha256: string;
@@ -156,6 +157,7 @@ export interface CommandArgumentCompletion {
 }
 
 export interface SnapshotOptions {
+	strictEnvironment?: boolean;
 	include?: string[];
 	sessionDir?: string;
 	/** Temporary internal projections while snapshot storage remains wire-compatible. */
@@ -165,6 +167,6 @@ export interface SnapshotOptions {
 }
 
 export interface SnapshotApplyPlan {
-	writes: Array<{ target: string; content: Buffer }>;
+	writes: Array<{ target: string; content: Buffer; mode?: number }>;
 	deletes: string[];
 }

@@ -169,18 +169,24 @@ for (const direction of ["local", "remote"]) {
 			const head = await backend.readHead();
 			assert.ok(head);
 			assert.deepEqual(
-				(await backend.readSnapshot(head.snapshotRef)).files,
+				(await backend.readSnapshot(head.snapshotRef)).files.filter(
+					(file) => file.path !== "sync-environment.json",
+				),
 				[],
 			);
 			assert.deepEqual(
-				(await readStateForConfig(await loadConfig())).lastFileHashes,
+				Object.fromEntries(
+					Object.entries(
+						(await readStateForConfig(await loadConfig())).lastFileHashes,
+					).filter(([name]) => name !== "sync-environment.json"),
+				),
 				{},
 			);
 		});
 	});
 }
 
-test("deselecting a directory neither deletes local content nor remote content on later pushes and pulls", async () => {
+test("strict policy withdrawal deletes owned paths; later never-managed additions remain untouched", async () => {
 	await withTempHome(async (agentDir) => {
 		configure(agentDir);
 		localWrite(agentDir, "preferences.txt", "base");
@@ -194,7 +200,8 @@ test("deselecting a directory neither deletes local content nor remote content o
 			sync: { ...setup.sync, include: ["preferences.txt"] },
 		}));
 		await syncBoth(ctx, options, () => backend);
-		assert.deepEqual(await backend.readHead(), before);
+		assert.notEqual((await backend.readHead())?.revision, before?.revision);
+		assert.equal(existsSync(path.join(agentDir, "snippets/only.txt")), false);
 		localWrite(agentDir, "snippets/only.txt", "unmanaged local edit");
 		localWrite(agentDir, "preferences.txt", "local edit");
 		await syncBoth(ctx, options, () => backend);
@@ -204,7 +211,7 @@ test("deselecting a directory neither deletes local content nor remote content o
 		assert.equal(
 			uploaded.files.find((file) => file.path === "snippets/only.txt")
 				?.contentBase64,
-			Buffer.from("preserve remote").toString("base64"),
+			undefined,
 		);
 		await publish(
 			backend,
@@ -354,7 +361,14 @@ for (const scenario of [
 			} else {
 				await syncBoth(ctx, options, () => backend);
 				if (scenario === "empty-both")
-					assert.equal(await backend.readHead(), undefined);
+					assert.equal(
+						(
+							await backend.readSnapshot(
+								(await backend.readHead())?.snapshotRef ?? "",
+							)
+						).version,
+						2,
+					);
 				else
 					assert.equal(
 						readFileSync(path.join(agentDir, "preferences.txt"), "utf8"),

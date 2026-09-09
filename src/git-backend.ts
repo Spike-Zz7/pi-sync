@@ -164,6 +164,7 @@ export class GitSyncBackend implements SyncBackend {
 				path: file.path,
 				contentBase64: content.toString("base64"),
 				sha256: file.sha256,
+				...(file.mode === undefined ? {} : { mode: file.mode }),
 			};
 		});
 		const snapshot: Snapshot = {
@@ -207,7 +208,7 @@ export class GitSyncBackend implements SyncBackend {
 		}
 		throwIfAborted(options.signal);
 		const manifest: GitManifest = {
-			version: GIT_MANIFEST_VERSION,
+			version: snapshot.version === 2 ? GIT_MANIFEST_VERSION : 2,
 			snapshotVersion: snapshot.version,
 			snapshotId: snapshot.id,
 			createdAt: snapshot.createdAt,
@@ -222,10 +223,11 @@ export class GitSyncBackend implements SyncBackend {
 			...(snapshot.selection === undefined
 				? {}
 				: { selection: snapshot.selection }),
-			files: files.map(({ path: filePath, sha256: fileSha, size }) => ({
+			files: files.map(({ path: filePath, sha256: fileSha, size, mode }) => ({
 				path: filePath,
 				sha256: fileSha,
 				size,
+				...(mode === undefined ? {} : { mode }),
 			})),
 		};
 		let candidate: string;
